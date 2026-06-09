@@ -17,10 +17,10 @@ android {
 
     signingConfigs {
         create("release") {
-            // KEYSTORE_PATH must be an absolute path set by the CI workflow
             val ksPath = System.getenv("KEYSTORE_PATH")
             if (!ksPath.isNullOrBlank()) {
                 storeFile      = file(ksPath)
+                storeType      = "JKS"
                 keyAlias       = System.getenv("KEY_ALIAS")      ?: "uiqa"
                 keyPassword    = System.getenv("KEY_PASSWORD")   ?: ""
                 storePassword  = System.getenv("STORE_PASSWORD") ?: ""
@@ -30,8 +30,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled    = true
-            isShrinkResources  = true
+            isMinifyEnabled   = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
