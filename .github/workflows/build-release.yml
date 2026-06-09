@@ -33,43 +33,45 @@ jobs:
 
       - name: Setup keystore
         run: |
-          mkdir -p keystore
+          mkdir -p "$GITHUB_WORKSPACE/keystore"
+          KS_ABS="$GITHUB_WORKSPACE/keystore/release.jks"
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore/release.jks
-            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
-            echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$KS_ABS"
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}"            >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}"       >> $GITHUB_ENV
+            echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}"   >> $GITHUB_ENV
           else
             keytool -genkeypair \
               -alias uiqa -keyalg RSA -keysize 4096 -validity 10000 \
-              -keystore keystore/release.jks \
+              -keystore "$KS_ABS" \
               -storepass UIQAStore2025 -keypass UIQAKey2025 \
               -dname "CN=EnterpriseUIQA,OU=QA,O=Enterprise,L=Cairo,ST=Cairo,C=EG" \
               -noprompt
-            echo "KEY_ALIAS=uiqa"            >> $GITHUB_ENV
-            echo "KEY_PASSWORD=UIQAKey2025"  >> $GITHUB_ENV
-            echo "STORE_PASSWORD=UIQAStore2025" >> $GITHUB_ENV
+            echo "KEY_ALIAS=uiqa"               >> $GITHUB_ENV
+            echo "KEY_PASSWORD=UIQAKey2025"      >> $GITHUB_ENV
+            echo "STORE_PASSWORD=UIQAStore2025"  >> $GITHUB_ENV
           fi
+          echo "KEYSTORE_PATH=$KS_ABS" >> $GITHUB_ENV
+          echo "Keystore ready: $KS_ABS"
 
       - name: Build Release APK
-        env:
-          KEYSTORE_PATH: keystore/release.jks
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Verify APK signature
         run: |
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
-          echo "APK found: $APK"
-          jarsigner -verify -verbose -certs "$APK" | grep -E "verified|signer|CN=" | head -10
+          echo "APK: $APK ($(du -sh $APK | cut -f1))"
+          jarsigner -verify -verbose -certs "$APK" 2>&1 | grep -E "jar verified|CN=|signer" | head -5
 
-      - name: Rename & stage APK
+      - name: Rename APK
         run: |
           VERSION="${{ github.event.inputs.version_name || '1.0.0' }}"
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
-          mv "$APK" "EnterpriseUIQA-v${VERSION}-release.apk"
-          echo "APK_PATH=EnterpriseUIQA-v${VERSION}-release.apk" >> $GITHUB_ENV
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          ls -lh "EnterpriseUIQA-v${VERSION}-release.apk"
+          DEST="EnterpriseUIQA-v${VERSION}-release-signed.apk"
+          mv "$APK" "$DEST"
+          echo "APK_PATH=$DEST"    >> $GITHUB_ENV
+          echo "VERSION=$VERSION"  >> $GITHUB_ENV
+          ls -lh "$DEST"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -87,12 +89,10 @@ jobs:
           body: |
             ## Enterprise UI QA Automation Framework v${{ env.VERSION }}
             - ✅ `UiAutomationService` — Custom AccessibilityService
-            - ✅ `BezierTouchEngine` — Cubic Bezier touch simulation (4 control points)
-            - ✅ Swipe, Tap, LongPress gestures
+            - ✅ `BezierTouchEngine` — Cubic Bezier touch simulation
+            - ✅ Swipe / Tap / LongPress gestures
             - ✅ Window tree inspector
-            - ✅ Signed with RSA-4096 digital signature
-
-            **Install:** Enable "Unknown sources" → install APK → enable Accessibility Service
+            - ✅ Signed with RSA-4096
           draft: false
           prerelease: false
         env:
