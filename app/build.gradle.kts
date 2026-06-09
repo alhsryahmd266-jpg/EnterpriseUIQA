@@ -17,17 +17,21 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile   = file(System.getenv("KEYSTORE_PATH") ?: "keystore/release.jks")
-            keyAlias      = System.getenv("KEY_ALIAS")      ?: "uiqa"
-            keyPassword   = System.getenv("KEY_PASSWORD")   ?: ""
-            storePassword = System.getenv("STORE_PASSWORD") ?: ""
+            // KEYSTORE_PATH must be an absolute path set by the CI workflow
+            val ksPath = System.getenv("KEYSTORE_PATH")
+            if (!ksPath.isNullOrBlank()) {
+                storeFile      = file(ksPath)
+                keyAlias       = System.getenv("KEY_ALIAS")      ?: "uiqa"
+                keyPassword    = System.getenv("KEY_PASSWORD")   ?: ""
+                storePassword  = System.getenv("STORE_PASSWORD") ?: ""
+            }
         }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            isMinifyEnabled    = true
+            isShrinkResources  = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -36,7 +40,7 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
-            isDebuggable = true
+            isDebuggable        = true
         }
     }
 
