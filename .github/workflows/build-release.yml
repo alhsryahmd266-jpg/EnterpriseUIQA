@@ -31,7 +31,7 @@ jobs:
         with:
           gradle-version: '8.6'
 
-      - name: Setup keystore
+      - name: Setup keystore (JKS format)
         run: |
           mkdir -p "$GITHUB_WORKSPACE/keystore"
           KS_ABS="$GITHUB_WORKSPACE/keystore/release.jks"
@@ -41,18 +41,25 @@ jobs:
             echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}"       >> $GITHUB_ENV
             echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}"   >> $GITHUB_ENV
           else
+            # Force JKS format; use identical store+key password to avoid PKCS12 padding issues
             keytool -genkeypair \
-              -alias uiqa -keyalg RSA -keysize 4096 -validity 10000 \
+              -alias uiqa \
+              -keyalg RSA \
+              -keysize 4096 \
+              -validity 10000 \
+              -storetype JKS \
               -keystore "$KS_ABS" \
-              -storepass UIQAStore2025 -keypass UIQAKey2025 \
+              -storepass EnterpriseUIQA2025 \
+              -keypass  EnterpriseUIQA2025 \
               -dname "CN=EnterpriseUIQA,OU=QA,O=Enterprise,L=Cairo,ST=Cairo,C=EG" \
               -noprompt
-            echo "KEY_ALIAS=uiqa"               >> $GITHUB_ENV
-            echo "KEY_PASSWORD=UIQAKey2025"      >> $GITHUB_ENV
-            echo "STORE_PASSWORD=UIQAStore2025"  >> $GITHUB_ENV
+            echo "KEY_ALIAS=uiqa"                    >> $GITHUB_ENV
+            echo "KEY_PASSWORD=EnterpriseUIQA2025"   >> $GITHUB_ENV
+            echo "STORE_PASSWORD=EnterpriseUIQA2025" >> $GITHUB_ENV
           fi
-          echo "KEYSTORE_PATH=$KS_ABS" >> $GITHUB_ENV
-          echo "Keystore ready: $KS_ABS"
+          echo "KEYSTORE_PATH=$KS_ABS"               >> $GITHUB_ENV
+          echo "Keystore OK → $KS_ABS"
+          keytool -list -keystore "$KS_ABS" -storepass EnterpriseUIQA2025 2>&1 | grep -E "Alias|Entry type|valid" || true
 
       - name: Build Release APK
         run: gradle assembleRelease --no-daemon --stacktrace
@@ -60,7 +67,8 @@ jobs:
       - name: Verify APK signature
         run: |
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
-          echo "APK: $APK ($(du -sh $APK | cut -f1))"
+          SIZE=$(du -sh "$APK" | cut -f1)
+          echo "APK: $APK  ($SIZE)"
           jarsigner -verify -verbose -certs "$APK" 2>&1 | grep -E "jar verified|CN=|signer" | head -5
 
       - name: Rename APK
@@ -69,8 +77,8 @@ jobs:
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
           DEST="EnterpriseUIQA-v${VERSION}-release-signed.apk"
           mv "$APK" "$DEST"
-          echo "APK_PATH=$DEST"    >> $GITHUB_ENV
-          echo "VERSION=$VERSION"  >> $GITHUB_ENV
+          echo "APK_PATH=$DEST"   >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
           ls -lh "$DEST"
 
       - name: Upload APK artifact
@@ -92,7 +100,7 @@ jobs:
             - ✅ `BezierTouchEngine` — Cubic Bezier touch simulation
             - ✅ Swipe / Tap / LongPress gestures
             - ✅ Window tree inspector
-            - ✅ Signed with RSA-4096
+            - ✅ Signed RSA-4096 (JKS)
           draft: false
           prerelease: false
         env:
