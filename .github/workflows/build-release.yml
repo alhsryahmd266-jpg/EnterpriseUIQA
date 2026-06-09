@@ -17,11 +17,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── 2. JDK 17 ────────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -29,26 +27,37 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      # ── 3. Gradle permissions ────────────────────────────────────────────
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # ── 4. Decode keystore from GitHub Secret ────────────────────────────
-      - name: Decode release keystore
+      - name: Setup keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore/release.jks
-          echo "Keystore decoded ✓"
+          mkdir -p keystore
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore/release.jks
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "Using custom keystore from secrets"
+          else
+            keytool -genkeypair \
+              -alias uiqa \
+              -keyalg RSA -keysize 4096 -validity 10000 \
+              -keystore keystore/release.jks \
+              -storepass UIQAStore2025 -keypass UIQAKey2025 \
+              -dname "CN=EnterpriseUIQA,OU=QA,O=Enterprise,L=Cairo,ST=Cairo,C=EG" \
+              -noprompt
+            echo "KEY_ALIAS=uiqa" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=UIQAKey2025" >> $GITHUB_ENV
+            echo "STORE_PASSWORD=UIQAStore2025" >> $GITHUB_ENV
+            echo "Auto-generated keystore for CI signing"
+          fi
 
-      # ── 5. Build Release APK ─────────────────────────────────────────────
       - name: Build Release APK
         env:
           KEYSTORE_PATH: keystore/release.jks
-          KEY_ALIAS:     ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD:  ${{ secrets.KEY_PASSWORD }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      # ── 6. Rename APK ────────────────────────────────────────────────────
       - name: Rename APK
         run: |
           VERSION="${{ github.event.inputs.version_name || '1.0.0' }}"
@@ -57,7 +66,6 @@ jobs:
           echo "APK_PATH=EnterpriseUIQA-v${VERSION}-release.apk" >> $GITHUB_ENV
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
-      # ── 7. Upload APK artifact ───────────────────────────────────────────
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -65,7 +73,6 @@ jobs:
           path: ${{ env.APK_PATH }}
           retention-days: 30
 
-      # ── 8. Create GitHub Release (only on tag push) ──────────────────────
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -73,20 +80,11 @@ jobs:
           files: ${{ env.APK_PATH }}
           name: "Enterprise UI QA v${{ env.VERSION }}"
           body: |
-            ## Enterprise UI QA Automation Framework
-            ### Release v${{ env.VERSION }}
-
-            #### المحتويات:
-            - ✅ `UiAutomationService` — خدمة وصول مخصصة
-            - ✅ `BezierTouchEngine` — محرك محاكاة لمس بمنحنيات بيزيه
-            - ✅ دعم السحب، النقر، والضغط المطوّل
-            - ✅ فحص شجرة العناصر الكاملة
-
-            #### التثبيت:
-            1. حمّل الـ APK
-            2. فعّل "مصادر غير معروفة" في الإعدادات
-            3. ثبّت وافتح التطبيق
-            4. فعّل خدمة إمكانية الوصول من الإعدادات
+            ## Enterprise UI QA Automation Framework v${{ env.VERSION }}
+            - ✅ UiAutomationService — Custom AccessibilityService
+            - ✅ BezierTouchEngine — Cubic Bezier touch simulation
+            - ✅ Full gesture support: Swipe, Tap, LongPress
+            - ✅ Window tree inspector
           draft: false
           prerelease: false
         env:
