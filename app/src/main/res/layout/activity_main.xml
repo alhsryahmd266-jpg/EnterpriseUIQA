@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="32dp"
+    android:background="#0D1117">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Enterprise UI QA"
+        android:textColor="#58A6FF"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Automation Framework v1.0"
+        android:textColor="#8B949E"
+        android:textSize="14sp"
+        android:layout_marginBottom="40dp"/>
+
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="جاري الفحص..."
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="32dp"/>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnOpenAccessibility"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="فتح إعدادات إمكانية الوصول"
+        android:textColor="#0D1117"
+        android:backgroundTint="#58A6FF"
+        android:paddingHorizontal="24dp"/>
+
+</LinearLayout>
