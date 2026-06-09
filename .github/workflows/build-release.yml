@@ -11,6 +11,9 @@ on:
         required: false
         default: '1.0.0'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build, Sign & Release APK
@@ -41,7 +44,6 @@ jobs:
             echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}"       >> $GITHUB_ENV
             echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}"   >> $GITHUB_ENV
           else
-            # Force JKS format; use identical store+key password to avoid PKCS12 padding issues
             keytool -genkeypair \
               -alias uiqa \
               -keyalg RSA \
@@ -57,9 +59,8 @@ jobs:
             echo "KEY_PASSWORD=EnterpriseUIQA2025"   >> $GITHUB_ENV
             echo "STORE_PASSWORD=EnterpriseUIQA2025" >> $GITHUB_ENV
           fi
-          echo "KEYSTORE_PATH=$KS_ABS"               >> $GITHUB_ENV
-          echo "Keystore OK → $KS_ABS"
-          keytool -list -keystore "$KS_ABS" -storepass EnterpriseUIQA2025 2>&1 | grep -E "Alias|Entry type|valid" || true
+          echo "KEYSTORE_PATH=$KS_ABS" >> $GITHUB_ENV
+          echo "Keystore ready: $KS_ABS"
 
       - name: Build Release APK
         run: gradle assembleRelease --no-daemon --stacktrace
@@ -73,9 +74,11 @@ jobs:
 
       - name: Rename APK
         run: |
-          VERSION="${{ github.event.inputs.version_name || '1.0.0' }}"
+          VERSION="${{ github.ref_name }}"
+          [[ "$VERSION" == refs/tags/* ]] && VERSION="${VERSION#refs/tags/}"
+          [[ "$VERSION" == v* ]] || VERSION="${{ github.event.inputs.version_name || '1.0.0' }}"
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
-          DEST="EnterpriseUIQA-v${VERSION}-release-signed.apk"
+          DEST="EnterpriseUIQA-${VERSION}-release-signed.apk"
           mv "$APK" "$DEST"
           echo "APK_PATH=$DEST"   >> $GITHUB_ENV
           echo "VERSION=$VERSION" >> $GITHUB_ENV
@@ -86,21 +89,29 @@ jobs:
         with:
           name: EnterpriseUIQA-release-apk
           path: ${{ env.APK_PATH }}
-          retention-days: 30
+          retention-days: 90
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.APK_PATH }}
-          name: "Enterprise UI QA v${{ env.VERSION }}"
+          name: "Enterprise UI QA ${{ env.VERSION }}"
           body: |
-            ## Enterprise UI QA Automation Framework v${{ env.VERSION }}
-            - ✅ `UiAutomationService` — Custom AccessibilityService
-            - ✅ `BezierTouchEngine` — Cubic Bezier touch simulation
+            ## Enterprise UI QA Automation Framework ${{ env.VERSION }}
+
+            ### ما يتضمنه الإصدار:
+            - ✅ `UiAutomationService` — Custom AccessibilityService لأتمتة فحص الواجهات
+            - ✅ `BezierTouchEngine` — محرك Cubic Bezier لمحاكاة حركة اليد الطبيعية
             - ✅ Swipe / Tap / LongPress gestures
-            - ✅ Window tree inspector
-            - ✅ Signed RSA-4096 (JKS)
+            - ✅ Window tree inspector — فحص شجرة العناصر كاملة
+            - ✅ موقّع رقمياً بـ RSA-4096 (JKS)
+
+            ### طريقة التثبيت:
+            1. حمّل الـ APK من الأسفل
+            2. فعّل "مصادر غير معروفة" في إعدادات الجهاز
+            3. ثبّت التطبيق
+            4. افتحه وفعّل خدمة إمكانية الوصول
           draft: false
           prerelease: false
         env:
