@@ -13,19 +13,14 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
         create("release") {
-            val keystoreFile = System.getenv("KEYSTORE_PATH") ?: "keystore/release.jks"
-            val keyAlias    = System.getenv("KEY_ALIAS")     ?: "uiqa"
-            val keyPass     = System.getenv("KEY_PASSWORD")  ?: ""
-            val storePass   = System.getenv("STORE_PASSWORD")?: ""
-            storeFile   = file(keystoreFile)
-            this.keyAlias      = keyAlias
-            keyPassword = keyPass
-            storePassword = storePass
+            storeFile   = file(System.getenv("KEYSTORE_PATH") ?: "keystore/release.jks")
+            keyAlias      = System.getenv("KEY_ALIAS")      ?: "uiqa"
+            keyPassword   = System.getenv("KEY_PASSWORD")   ?: ""
+            storePassword = System.getenv("STORE_PASSWORD") ?: ""
         }
     }
 
@@ -53,10 +48,6 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-
-    buildFeatures {
-        viewBinding = true
-    }
 }
 
 dependencies {
@@ -65,7 +56,4 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }
