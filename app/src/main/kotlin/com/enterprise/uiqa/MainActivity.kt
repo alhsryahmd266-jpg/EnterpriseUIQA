@@ -3,7 +3,6 @@ package com.enterprise.uiqa
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
-import android.text.TextUtils
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -32,12 +31,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
-        val service = "${packageName}/${UiAutomationService::class.java.canonicalName}"
-        val enabled = Settings.Secure.getString(
+        val serviceName = "${packageName}/${UiAutomationService::class.java.canonicalName}"
+        val enabledServices = Settings.Secure.getString(
             contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return TextUtils.SimpleStringSplitter(':').also { it.setString(enabled) }
-            .asSequence().any { it.equals(service, ignoreCase = true) }
+        // Use Kotlin split() to avoid TextUtils.SimpleStringSplitter ambiguity
+        return enabledServices.split(':')
+            .any { it.equals(serviceName, ignoreCase = true) }
     }
 }
