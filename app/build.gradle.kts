@@ -11,19 +11,19 @@ android {
         applicationId = "com.enterprise.uiqa"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 5
+        versionName = "1.0.5"
     }
 
     signingConfigs {
         create("release") {
             val ksPath = System.getenv("KEYSTORE_PATH")
             if (!ksPath.isNullOrBlank()) {
-                storeFile      = file(ksPath)
-                storeType      = "JKS"
-                keyAlias       = System.getenv("KEY_ALIAS")      ?: "uiqa"
-                keyPassword    = System.getenv("KEY_PASSWORD")   ?: ""
-                storePassword  = System.getenv("STORE_PASSWORD") ?: ""
+                storeFile     = file(ksPath)
+                storeType     = "JKS"
+                keyAlias      = System.getenv("KEY_ALIAS")      ?: "uiqa"
+                keyPassword   = System.getenv("KEY_PASSWORD")   ?: ""
+                storePassword = System.getenv("STORE_PASSWORD") ?: ""
             }
         }
     }
@@ -48,10 +48,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+    kotlinOptions { jvmTarget = "17" }
 }
 
 dependencies {
@@ -60,4 +57,7 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // ML Kit Pose Detection — اكتشاف الجسم البشري كاملاً بدون إنترنت
+    implementation("com.google.mlkit:pose-detection:18.0.0-beta4")
 }
