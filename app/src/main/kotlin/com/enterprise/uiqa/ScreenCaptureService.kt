@@ -40,7 +40,7 @@ class ScreenCaptureService : Service() {
         private const val MIN_LANDMARKS        = 4
 
         // منطقة الوسط: 30% من كل جانب (يعني الوسط 40% من الشاشة)
-        private const val CENTER_MARGIN = 0.30f
+        private const val CENTER_MARGIN = 0.38f
 
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
