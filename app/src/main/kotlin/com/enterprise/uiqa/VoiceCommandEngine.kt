@@ -9,21 +9,23 @@ import android.speech.SpeechRecognizer
 import android.util.Log
 
 /**
- * VoiceCommandEngine — التحكم الصوتي
+ * VoiceCommandEngine — التحكم الصوتي لذوي الإعاقة
  * المريض يقول أمراً بصوته → النظام ينفذه في اللعبة
  *
- * الأوامر المدعومة (عربي + إنجليزي):
- *   "نار" / "fire" / "اضغط"   → إطلاق نار
- *   "يمين" / "right"           → تحرك يمين
- *   "يسار" / "left"            → تحرك يسار
- *   "للأمام" / "forward"       → تقدم
- *   "وقف" / "stop"             → توقف
- *   "قفز" / "jump"             → قفز
- *   "إعادة" / "reload"         → إعادة تحميل
+ * عربي + إنجليزي:
+ *   "نار" / "fire"          → FIRE
+ *   "يمين" / "right"        → MOVE_RIGHT
+ *   "يسار" / "left"         → MOVE_LEFT
+ *   "للأمام" / "forward"    → MOVE_FORWARD
+ *   "وقف" / "stop"          → STOP
+ *   "قفز" / "jump"          → JUMP
+ *   "إعادة" / "reload"      → RELOAD
  */
 class VoiceCommandEngine(private val context: Context) {
 
-    private const val TAG = "VoiceCommandEngine"
+    companion object {
+        private const val TAG = "VoiceCommandEngine"
+    }
 
     enum class Command {
         FIRE, MOVE_RIGHT, MOVE_LEFT, MOVE_FORWARD, MOVE_BACK,
@@ -59,7 +61,7 @@ class VoiceCommandEngine(private val context: Context) {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-EG")   // عربي أولاً
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-EG")
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US")
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
@@ -75,14 +77,12 @@ class VoiceCommandEngine(private val context: Context) {
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
             val confidences = results
                 .getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
-
             matches.firstOrNull()?.let { text ->
-                val cmd = parseCommand(text.lowercase().trim())
+                val cmd  = parseCommand(text.lowercase().trim())
                 val conf = confidences?.firstOrNull() ?: 0.8f
                 Log.i(TAG, "Voice: \"$text\" → ${cmd.name} (${(conf*100).toInt()}%)")
                 listener?.onCommand(cmd, conf)
             }
-            // استمر في الاستماع تلقائياً
             if (isListening) startListening()
         }
 
@@ -91,17 +91,16 @@ class VoiceCommandEngine(private val context: Context) {
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
             matches.firstOrNull()?.let { text ->
                 val cmd = parseCommand(text.lowercase().trim())
-                if (cmd != Command.UNKNOWN)
-                    listener?.onCommand(cmd, 0.6f)  // partial = ثقة أقل
+                if (cmd != Command.UNKNOWN) listener?.onCommand(cmd, 0.6f)
             }
         }
 
         override fun onError(error: Int) {
             Log.w(TAG, "Voice error: $error")
-            if (isListening) startListening()   // أعد المحاولة
+            if (isListening) startListening()
         }
 
-        override fun onReadyForSpeech(p: Bundle?) { Log.d(TAG, "listening...") }
+        override fun onReadyForSpeech(p: Bundle?) {}
         override fun onBeginningOfSpeech()  {}
         override fun onRmsChanged(v: Float) {}
         override fun onBufferReceived(b: ByteArray?) {}
@@ -110,15 +109,15 @@ class VoiceCommandEngine(private val context: Context) {
     }
 
     private fun parseCommand(text: String): Command = when {
-        text.containsAny("نار","fire","اطلاق","اضغط","shoot","tap")  -> Command.FIRE
-        text.containsAny("يمين","right","يمن")                        -> Command.MOVE_RIGHT
-        text.containsAny("يسار","left","يسر")                         -> Command.MOVE_LEFT
-        text.containsAny("أمام","امام","forward","تقدم","تقدّم")      -> Command.MOVE_FORWARD
-        text.containsAny("خلف","back","backward","تراجع","رجوع")      -> Command.MOVE_BACK
-        text.containsAny("وقف","stop","إيقاف","ايقاف","قف")           -> Command.STOP
-        text.containsAny("قفز","jump","اقفز")                         -> Command.JUMP
-        text.containsAny("إعادة","اعادة","reload","ملء","ملئ")        -> Command.RELOAD
-        else                                                           -> Command.UNKNOWN
+        text.containsAny("نار","fire","اطلاق","اضغط","shoot","tap") -> Command.FIRE
+        text.containsAny("يمين","right","يمن")                      -> Command.MOVE_RIGHT
+        text.containsAny("يسار","left","يسر")                       -> Command.MOVE_LEFT
+        text.containsAny("أمام","امام","forward","تقدم")            -> Command.MOVE_FORWARD
+        text.containsAny("خلف","back","backward","تراجع")           -> Command.MOVE_BACK
+        text.containsAny("وقف","stop","إيقاف","قف")                 -> Command.STOP
+        text.containsAny("قفز","jump","اقفز")                       -> Command.JUMP
+        text.containsAny("إعادة","اعادة","reload","ملء")            -> Command.RELOAD
+        else                                                         -> Command.UNKNOWN
     }
 
     private fun String.containsAny(vararg keywords: String) =
