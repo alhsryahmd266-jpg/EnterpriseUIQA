@@ -12,364 +12,170 @@ import android.view.accessibility.AccessibilityNodeInfo
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * UiAutomationService — خدمة الوصول المخصصة لأتمتة فحص واجهات المستخدم
- * Enterprise UI QA Automation Framework
- */
 class UiAutomationService : AccessibilityService() {
 
     companion object {
         private const val TAG = "UiAutomationService"
-
-        @Volatile
-        var instance: UiAutomationService? = null
+        @Volatile var instance: UiAutomationService? = null
             private set
     }
 
-    // =====================================================================
-    // دورة حياة الخدمة
-    // =====================================================================
-
-    override fun onServiceConnected() {
-        super.onServiceConnected()
-        instance = this
-        Log.i(TAG, "UiAutomationService connected — جاهز للأتمتة")
-    }
-
-    override fun onDestroy() {
-        instance = null
-        super.onDestroy()
-        Log.i(TAG, "UiAutomationService destroyed")
-    }
-
+    override fun onServiceConnected() { super.onServiceConnected(); instance = this; Log.i(TAG, "connected") }
+    override fun onDestroy() { instance = null; super.onDestroy() }
+    override fun onInterrupt() { Log.w(TAG, "interrupted") }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ->
-                Log.d(TAG, "Window changed: ${event.packageName} / ${event.className}")
-            AccessibilityEvent.TYPE_VIEW_CLICKED ->
-                Log.d(TAG, "View clicked: ${event.className}")
-            else -> { /* تجاهل باقي الأحداث */ }
-        }
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            Log.d(TAG, "Window: ${event.packageName}")
     }
 
-    override fun onInterrupt() {
-        Log.w(TAG, "Service interrupted")
-    }
-
-    // =====================================================================
-    // API الأتمتة الأساسي
-    // =====================================================================
+    // =========================================================================
+    // tapBestTarget — يدمج DPU مع الضغط مباشرة
+    // =========================================================================
 
     /**
-     * ينفّذ سحباً ناعماً بين نقطتين باستخدام محرك بيزيه
+     * يستقبل صناديق خام من ScreenCaptureService، يختار الأفضل عبر ProximitySorter،
+     * يعوّض الانحراف عبر DynamicOffset، ثم ينفّذ النقرة في أجزاء من الثانية.
+     *
+     * @param rawBoxes     مصفوفات [[Xmin,Ymin,Xmax,Ymax], …]
+     * @param screenWidth  عرض الشاشة
+     * @param screenHeight ارتفاع الشاشة
+     * @param offsetState  حالة الإزاحة للجلسة الحالية
+     * @param isPressing   هل الضغط مستمر؟
+     * @param callback     نتيجة اختيارية
      */
-    fun swipe(
-        x1: Float, y1: Float,
-        x2: Float, y2: Float,
-        durationMs: Long = 300L,
+    fun tapBestTarget(
+        rawBoxes: List<FloatArray>,
+        screenWidth: Int,
+        screenHeight: Int,
+        offsetState: DataProcessingUnit.DynamicOffsetState,
+        isPressing: Boolean,
         callback: GestureResultCallback? = null
     ) {
-        val gesture = BezierTouchEngine.buildSwipeGesture(x1, y1, x2, y2, durationMs)
-        dispatchGesture(gesture, callback ?: defaultCallback("swipe"), null)
-        Log.d(TAG, "Swipe dispatched: ($x1,$y1) → ($x2,$y2)")
+        val point = DataProcessingUnit.processAndGetTouchPoint(
+            rawBoxes, screenWidth, screenHeight, offsetState, isPressing
+        ) ?: run { Log.w(TAG, "tapBestTarget: no boxes"); return }
+
+        Log.d(TAG, "tapBestTarget → adj=(${point.adjusted.x.toInt()},${point.adjusted.y.toInt()}) " +
+                   "Δy=${point.offsetApplied.toInt()} Σ=${point.totalOffset.toInt()}")
+        tap(point.adjusted.x, point.adjusted.y, callback)
     }
 
-    /**
-     * ينفّذ نقرة بسيطة على إحداثيات محددة
-     */
+    // =========================================================================
+    // API الأتمتة الأساسي
+    // =========================================================================
+
     fun tap(x: Float, y: Float, callback: GestureResultCallback? = null) {
         val gesture = BezierTouchEngine.buildTapGesture(x, y)
         dispatchGesture(gesture, callback ?: defaultCallback("tap"), null)
-        Log.d(TAG, "Tap dispatched: ($x,$y)")
     }
 
-    /**
-     * ينفّذ ضغطاً مطوّلاً على إحداثيات محددة
-     */
-    fun longPress(x: Float, y: Float, durationMs: Long = 800L, callback: GestureResultCallback? = null) {
+    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float,
+              durationMs: Long = 300L, callback: GestureResultCallback? = null) {
+        val gesture = BezierTouchEngine.buildSwipeGesture(x1, y1, x2, y2, durationMs)
+        dispatchGesture(gesture, callback ?: defaultCallback("swipe"), null)
+    }
+
+    fun longPress(x: Float, y: Float, durationMs: Long = 800L,
+                  callback: GestureResultCallback? = null) {
         val gesture = BezierTouchEngine.buildLongPressGesture(x, y, durationMs)
         dispatchGesture(gesture, callback ?: defaultCallback("longPress"), null)
-        Log.d(TAG, "LongPress dispatched: ($x,$y) for ${durationMs}ms")
     }
 
-    // =====================================================================
-    // ██  Advanced Multi-Touch — Concurrent Input Stress Testing  ██
-    // =====================================================================
+    // =========================================================================
+    // Advanced Multi-Touch Concurrent Input Stress Test
+    // =========================================================================
 
-    /**
-     * نتائج اختبار الضغط المتزامن
-     *
-     * @property dragSegmentsDispatched   عدد مقاطع السحب المُرسَلة
-     * @property tapBatchesDispatched     عدد دفعات النقرات المُرسَلة
-     * @property dragCancelled            هل أُلغي السحب؟
-     * @property tapsCancelled            عدد دفعات النقر التي أُلغيت
-     * @property totalElapsedMs           إجمالي الوقت المستغرق بالمللي ثانية
-     */
     data class StressTestReport(
-        val dragSegmentsDispatched: Int,
-        val tapBatchesDispatched: Int,
-        val dragCancelled: Boolean,
-        val tapsCancelled: Int,
-        val totalElapsedMs: Long
-    ) {
-        override fun toString(): String =
-            "StressTestReport[drag=$dragSegmentsDispatched segs (cancelled=$dragCancelled) | " +
-            "taps=$tapBatchesDispatched batches (cancelled=$tapsCancelled) | ${totalElapsedMs}ms]"
-    }
+        val dragSegmentsDispatched: Int, val tapBatchesDispatched: Int,
+        val dragCancelled: Boolean, val tapsCancelled: Int, val totalElapsedMs: Long
+    )
 
-    /**
-     * تشغيل اختبار إدخال متعدد متزامن — Advanced Multi-Touch Stress Test.
-     *
-     * يُطلق حدثين لمس مستقلين في نفس الوقت:
-     *
-     *  ① Continuous Vector Drag — سحب مستمر من نقطة ارتكاز ثابتة (مركز D-Pad افتراضي)
-     *    باتجاه متجهات ديناميكية تتحدث مع كل مقطع.
-     *    يُبنى كسلسلة من StrokeDescription مع willContinue=true حتى المقطع الأخير.
-     *
-     *  ② High-Frequency Pulse Taps — نقرات نبضية عالية التردد على مصفوفة إحداثيات
-     *    في النصف الآخر من الشاشة. كل دفعة تحتوي على الإحداثيات كلها في نفس اللحظة
-     *    بمقاطع زمنية متداخلة ضمن GestureDescription واحدة.
-     *
-     * الحدثان يعملان بشكل كامل غير متزامن (Handler + callback chains) بدون أي
-     * قفل أو blocking بين القناتين.
-     *
-     * @param dpadCenter         مركز D-Pad (pivot ثابت لبداية السحب)
-     * @param dragVectors        متجهات السحب — كل عنصر (dx, dy) يُطبَّق على الـ pivot
-     *                           تباعاً خلال جلسة الاختبار
-     * @param tapTargets         إحداثيات النقرات النبضية (يجب أن تكون في النصف الآخر من الشاشة)
-     * @param segmentDurationMs  مدة كل مقطع سحب بالمللي ثانية (افتراضي: 80)
-     * @param tapIntervalMs      الفاصل الزمني بين كل دفعة نقرات بالمللي ثانية (افتراضي: 60)
-     * @param tapHoldMs          مدة الضغط لكل نقرة نبضية بالمللي ثانية (افتراضي: 20)
-     * @param onReport           callback يُستدعى عند انتهاء الاختبار بالكامل
-     */
     fun runConcurrentInputStressTest(
-        dpadCenter: PointF,
-        dragVectors: List<PointF>,
-        tapTargets: List<PointF>,
-        segmentDurationMs: Long = 80L,
-        tapIntervalMs: Long = 60L,
-        tapHoldMs: Long = 20L,
+        dpadCenter: PointF, dragVectors: List<PointF>, tapTargets: List<PointF>,
+        segmentDurationMs: Long = 80L, tapIntervalMs: Long = 60L, tapHoldMs: Long = 20L,
         onReport: ((StressTestReport) -> Unit)? = null
     ) {
-        require(dragVectors.isNotEmpty()) { "dragVectors must not be empty" }
-        require(tapTargets.isNotEmpty()) { "tapTargets must not be empty" }
-        require(segmentDurationMs in 1..5000) { "segmentDurationMs must be 1–5000" }
-        require(tapIntervalMs in 1..1000) { "tapIntervalMs must be 1–1000" }
-        require(tapHoldMs in 1..500 && tapHoldMs < tapIntervalMs) {
-            "tapHoldMs must be 1–500 and less than tapIntervalMs"
-        }
-
+        require(dragVectors.isNotEmpty()); require(tapTargets.isNotEmpty())
         val startTime = System.currentTimeMillis()
         val mainHandler = Handler(Looper.getMainLooper())
+        val dragSegmentsSent = AtomicInteger(0); val tapBatchesSent = AtomicInteger(0)
+        val tapsCancelledCount = AtomicInteger(0); val dragCancelled = AtomicBoolean(false)
+        val dragDone = AtomicBoolean(false); val tapsDone = AtomicBoolean(false)
 
-        // ── مؤشرات الحالة (thread-safe) ──
-        val dragSegmentsSent   = AtomicInteger(0)
-        val tapBatchesSent     = AtomicInteger(0)
-        val tapsCancelledCount = AtomicInteger(0)
-        val dragCancelled      = AtomicBoolean(false)
-        val dragDone           = AtomicBoolean(false)
-        val tapsDone           = AtomicBoolean(false)
-
-        // ────────────────────────────────────────────────────────────────
-        // دالة مساعدة: دمج نتائج القناتين وإرسال التقرير النهائي
-        // ────────────────────────────────────────────────────────────────
         fun tryFinalize() {
             if (dragDone.get() && tapsDone.get()) {
-                val elapsed = System.currentTimeMillis() - startTime
-                val report  = StressTestReport(
-                    dragSegmentsDispatched = dragSegmentsSent.get(),
-                    tapBatchesDispatched   = tapBatchesSent.get(),
-                    dragCancelled          = dragCancelled.get(),
-                    tapsCancelled          = tapsCancelledCount.get(),
-                    totalElapsedMs         = elapsed
-                )
-                Log.i(TAG, "StressTest DONE — $report")
-                onReport?.invoke(report)
+                val r = StressTestReport(dragSegmentsSent.get(), tapBatchesSent.get(),
+                    dragCancelled.get(), tapsCancelledCount.get(),
+                    System.currentTimeMillis() - startTime)
+                Log.i(TAG, "StressTest DONE — $r"); onReport?.invoke(r)
             }
         }
 
-        // ────────────────────────────────────────────────────────────────
-        // قناة ①: Continuous Vector Drag
-        //   سلسلة callback تُرسل مقطعاً واحداً في كل مرة، وعند اكتماله
-        //   تنتقل للمقطع التالي حتى استنفاد جميع المتجهات.
-        // ────────────────────────────────────────────────────────────────
         fun dispatchDragSegment(index: Int) {
-            if (index >= dragVectors.size) {
-                dragDone.set(true)
-                tryFinalize()
-                return
-            }
-
-            val isLast  = (index == dragVectors.size - 1)
-            val vector  = dragVectors[index]
-            val target  = PointF(dpadCenter.x + vector.x, dpadCenter.y + vector.y)
-
-            val path = Path().apply {
-                moveTo(dpadCenter.x, dpadCenter.y)
-                lineTo(target.x, target.y)
-            }
-
-            // willContinue=true لكل المقاطع ماعدا الأخير لإبقاء "إصبع" السحب نشطاً
-            val stroke = GestureDescription.StrokeDescription(
-                path,
-                /* startTime  */ 0L,
-                /* duration   */ segmentDurationMs,
-                /* willContinue */ !isLast
-            )
-
+            if (index >= dragVectors.size) { dragDone.set(true); tryFinalize(); return }
+            val isLast = index == dragVectors.size - 1
+            val target = PointF(dpadCenter.x + dragVectors[index].x, dpadCenter.y + dragVectors[index].y)
+            val path = Path().apply { moveTo(dpadCenter.x, dpadCenter.y); lineTo(target.x, target.y) }
+            val stroke = GestureDescription.StrokeDescription(path, 0L, segmentDurationMs, !isLast)
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
-
             val cb = object : GestureResultCallback() {
-                override fun onCompleted(gd: GestureDescription) {
-                    dragSegmentsSent.incrementAndGet()
-                    Log.v(TAG, "Drag[$index] → (${target.x},${target.y}) ✓")
-                    mainHandler.post { dispatchDragSegment(index + 1) }
-                }
-                override fun onCancelled(gd: GestureDescription) {
-                    dragCancelled.set(true)
-                    dragSegmentsSent.incrementAndGet()
-                    Log.w(TAG, "Drag[$index] cancelled ✗")
-                    // نتابع حتى لو أُلغي مقطع
-                    mainHandler.post { dispatchDragSegment(index + 1) }
-                }
+                override fun onCompleted(gd: GestureDescription) { dragSegmentsSent.incrementAndGet(); mainHandler.post { dispatchDragSegment(index + 1) } }
+                override fun onCancelled(gd: GestureDescription) { dragCancelled.set(true); dragSegmentsSent.incrementAndGet(); mainHandler.post { dispatchDragSegment(index + 1) } }
             }
-
             dispatchGesture(gesture, cb, null)
         }
 
-        // ────────────────────────────────────────────────────────────────
-        // قناة ②: High-Frequency Pulse Taps
-        //   كل دفعة تُبنى كـ GestureDescription تحتوي على جميع إحداثيات
-        //   tapTargets كمقاطع متداخلة زمنياً (تبدأ بفاصل tapHoldMs بينها)
-        //   لمحاكاة الضغط المتوازي.
-        //   الدفعات التالية تُجدوَل على الـ mainHandler بفاصل tapIntervalMs.
-        // ────────────────────────────────────────────────────────────────
-        val tapBatchCount = dragVectors.size    // نفس عدد دفعات السحب للتزامن
-        var tapBatchIndex = 0
-
+        val tapBatchCount = dragVectors.size; var tapBatchIndex = 0
         fun dispatchTapBatch() {
-            if (tapBatchIndex >= tapBatchCount) {
-                tapsDone.set(true)
-                tryFinalize()
-                return
-            }
-
-            val currentBatch = tapBatchIndex
-            tapBatchIndex++
-
-            // ابنِ gesture واحدة تحتوي على جميع tap targets متداخلة زمنياً
+            if (tapBatchIndex >= tapBatchCount) { tapsDone.set(true); tryFinalize(); return }
+            val currentBatch = tapBatchIndex++
             val builder = GestureDescription.Builder()
             tapTargets.forEachIndexed { i, pt ->
-                val tapPath = Path().apply {
-                    moveTo(pt.x, pt.y)
-                    lineTo(pt.x + 0.1f, pt.y + 0.1f)   // حركة دقيقة جداً لتجاوز filter الـ zero-length
-                }
-                // كل tap يبدأ بـ i*2ms تأخير لتمييز المؤشرات
-                val tapStroke = GestureDescription.StrokeDescription(
-                    tapPath,
-                    /* startTime */ i * 2L,
-                    /* duration  */ tapHoldMs
-                )
-                builder.addStroke(tapStroke)
+                val tapPath = Path().apply { moveTo(pt.x, pt.y); lineTo(pt.x + 0.1f, pt.y + 0.1f) }
+                builder.addStroke(GestureDescription.StrokeDescription(tapPath, i * 2L, tapHoldMs))
             }
-
             val cb = object : GestureResultCallback() {
-                override fun onCompleted(gd: GestureDescription) {
-                    tapBatchesSent.incrementAndGet()
-                    Log.v(TAG, "TapBatch[$currentBatch] ×${tapTargets.size} ✓")
-                    mainHandler.postDelayed({ dispatchTapBatch() }, tapIntervalMs)
-                }
-                override fun onCancelled(gd: GestureDescription) {
-                    tapsCancelledCount.incrementAndGet()
-                    tapBatchesSent.incrementAndGet()
-                    Log.w(TAG, "TapBatch[$currentBatch] cancelled ✗")
-                    mainHandler.postDelayed({ dispatchTapBatch() }, tapIntervalMs)
-                }
+                override fun onCompleted(gd: GestureDescription) { tapBatchesSent.incrementAndGet(); mainHandler.postDelayed({ dispatchTapBatch() }, tapIntervalMs) }
+                override fun onCancelled(gd: GestureDescription) { tapsCancelledCount.incrementAndGet(); tapBatchesSent.incrementAndGet(); mainHandler.postDelayed({ dispatchTapBatch() }, tapIntervalMs) }
             }
-
             dispatchGesture(builder.build(), cb, null)
         }
 
-        // ────────────────────────────────────────────────────────────────
-        // إطلاق القناتين معاً — لا waiting، لا blocking
-        // ────────────────────────────────────────────────────────────────
-        Log.i(TAG,
-            "StressTest START — " +
-            "drag: ${dragVectors.size} vectors @ ${segmentDurationMs}ms each | " +
-            "taps: ${tapTargets.size} targets × $tapBatchCount batches @ ${tapIntervalMs}ms"
-        )
-        mainHandler.post { dispatchDragSegment(0)  }   // ① سحب
-        mainHandler.post { dispatchTapBatch()       }   // ② نقرات
+        mainHandler.post { dispatchDragSegment(0) }
+        mainHandler.post { dispatchTapBatch() }
     }
 
-    /**
-     * دالة مساعدة لبناء متجهات D-Pad جاهزة بأربعة اتجاهات + مركز
-     *
-     * @param pivot      نقطة المركز
-     * @param radius     نصف قطر الحركة بالـ px
-     * @param steps      عدد الخطوات المتوسطة لكل اتجاه
-     */
     fun buildDpadVectors(pivot: PointF, radius: Float, steps: Int = 4): List<PointF> {
-        val result = mutableListOf<PointF>()
-        // شمال
-        for (i in 1..steps) result.add(PointF(0f, -radius * i / steps))
-        // عودة للمركز
-        for (i in steps downTo 1) result.add(PointF(0f, -radius * i / steps))
-        // يمين
-        for (i in 1..steps) result.add(PointF(radius * i / steps, 0f))
-        // عودة للمركز
-        for (i in steps downTo 1) result.add(PointF(radius * i / steps, 0f))
-        // جنوب
-        for (i in 1..steps) result.add(PointF(0f, radius * i / steps))
-        // عودة للمركز
-        for (i in steps downTo 1) result.add(PointF(0f, radius * i / steps))
-        // غرب
-        for (i in 1..steps) result.add(PointF(-radius * i / steps, 0f))
-        // عودة للمركز
-        for (i in steps downTo 1) result.add(PointF(-radius * i / steps, 0f))
-        return result
+        val r = mutableListOf<PointF>()
+        for (i in 1..steps) r.add(PointF(0f, -radius * i / steps))
+        for (i in steps downTo 1) r.add(PointF(0f, -radius * i / steps))
+        for (i in 1..steps) r.add(PointF(radius * i / steps, 0f))
+        for (i in steps downTo 1) r.add(PointF(radius * i / steps, 0f))
+        for (i in 1..steps) r.add(PointF(0f, radius * i / steps))
+        for (i in steps downTo 1) r.add(PointF(0f, radius * i / steps))
+        for (i in 1..steps) r.add(PointF(-radius * i / steps, 0f))
+        for (i in steps downTo 1) r.add(PointF(-radius * i / steps, 0f))
+        return r
     }
 
-    // =====================================================================
-    // أدوات فحص العناصر
-    // =====================================================================
+    // =========================================================================
+    // فحص العناصر
+    // =========================================================================
 
-    fun findNodeByDescription(description: String): AccessibilityNodeInfo? =
-        rootInActiveWindow?.findAccessibilityNodeInfosByText(description)?.firstOrNull()
-
-    fun findNodeById(viewId: String): AccessibilityNodeInfo? =
-        rootInActiveWindow?.findAccessibilityNodeInfosByViewId(viewId)?.firstOrNull()
-
-    fun dumpWindowTree() {
-        val root = rootInActiveWindow ?: run {
-            Log.w(TAG, "No active window found")
-            return
-        }
-        dumpNode(root, 0)
-    }
+    fun findNodeByDescription(d: String) = rootInActiveWindow?.findAccessibilityNodeInfosByText(d)?.firstOrNull()
+    fun findNodeById(id: String) = rootInActiveWindow?.findAccessibilityNodeInfosByViewId(id)?.firstOrNull()
+    fun dumpWindowTree() { val root = rootInActiveWindow ?: return; dumpNode(root, 0) }
 
     private fun dumpNode(node: AccessibilityNodeInfo, depth: Int) {
         val indent = "  ".repeat(depth)
-        val bounds = android.graphics.Rect()
-        node.getBoundsInScreen(bounds)
-        Log.d(TAG, "$indent[${node.className}] id=${node.viewIdResourceName} " +
-                "text='${node.text}' desc='${node.contentDescription}' bounds=$bounds")
-        for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { dumpNode(it, depth + 1) }
-        }
+        val b = android.graphics.Rect(); node.getBoundsInScreen(b)
+        Log.d(TAG, "$indent[${node.className}] id=${node.viewIdResourceName} text='${node.text}' bounds=$b")
+        for (i in 0 until node.childCount) node.getChild(i)?.let { dumpNode(it, depth + 1) }
     }
 
-    // =====================================================================
-    // مساعدات داخلية
-    // =====================================================================
-
     private fun defaultCallback(action: String) = object : GestureResultCallback() {
-        override fun onCompleted(gestureDescription: GestureDescription) {
-            Log.i(TAG, "$action completed ✓")
-        }
-        override fun onCancelled(gestureDescription: GestureDescription) {
-            Log.w(TAG, "$action cancelled ✗")
-        }
+        override fun onCompleted(gd: GestureDescription) { Log.i(TAG, "$action ✓") }
+        override fun onCancelled(gd: GestureDescription) { Log.w(TAG, "$action ✗") }
     }
 }
