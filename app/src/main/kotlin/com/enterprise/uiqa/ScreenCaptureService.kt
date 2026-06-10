@@ -13,6 +13,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
@@ -25,21 +26,7 @@ import com.google.mlkit.vision.pose.PoseDetector
 import com.google.mlkit.vision.pose.PoseLandmark
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 
-/**
- * ScreenCaptureService v1.0.5 — اكتشاف الجسم البشري الكامل
- *
- * يستخدم ML Kit Pose Detection للتعرف على الجسم كاملاً (33 نقطة تشريحية)
- * بدون إنترنت، ثم يمرر الإحداثيات لـ DataProcessingUnit وUiAutomationService.
- *
- * ضمانات الأمان:
- *  • AtomicBoolean يمنع تشغيل كشفين في نفس الوقت
- *  • تصغير الإطار 50% قبل الكشف لتسريع ML Kit
- *  • تحرير Bitmap فوري بعد انتهاء كل عملية
- *  • الكشف على BACKGROUND thread لا يلمس الـ UI thread
- *  • معدل فحص تكيّفي: يسرع عند وجود هدف، يبطئ عند غيابه
- */
 class ScreenCaptureService : Service() {
 
     companion object {
@@ -47,44 +34,33 @@ class ScreenCaptureService : Service() {
         private const val NOTIF_CHANNEL_ID = "screen_capture_channel"
         private const val NOTIF_ID         = 1001
 
-        // ── معدل الفحص التكيّفي ──────────────────────────────────────────
-        private const val SCAN_FAST_MS    = 300L    // عند اكتشاف هدف
-        private const val SCAN_SLOW_MS    = 1200L   // عند عدم وجود هدف
-        private const val SCALE_FACTOR    = 0.5f    // تصغير 50% قبل ML Kit
+        // ── أسرع معدل ممكن عند وجود هدف ─────────────────────────────────
+        private const val SCAN_FAST_MS    = 80L     // ~12 إطار/ثانية عند وجود جسم
+        private const val SCAN_SLOW_MS    = 800L    // بطيء عند غياب الجسم
+        private const val SCAN_MANUAL_MS  = 150L    // معدل الضغط اليدوي
+        private const val SCALE_FACTOR    = 0.5f
 
-        // ── حدود جودة الكشف ──────────────────────────────────────────────
-        private const val LANDMARK_CONFIDENCE = 0.55f  // حد الثقة لكل نقطة
-        private const val MIN_LANDMARKS        = 5      // حد أدنى للنقاط المكتشفة
+        private const val LANDMARK_CONFIDENCE = 0.50f
+        private const val MIN_LANDMARKS        = 4
 
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
 
-        @Volatile var isRunning    = false
+        @Volatile var isRunning      = false
         @Volatile var detectedBodies = 0
     }
 
-    // ── حالة الخدمة ───────────────────────────────────────────────────────
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay?   = null
     private var imageReader: ImageReader?          = null
     private var workerThread: HandlerThread?       = null
     private var workerHandler: Handler?            = null
     private var poseDetector: PoseDetector?        = null
-    private val isDetecting   = AtomicBoolean(false)
-    private var scanIntervalMs = SCAN_SLOW_MS
+    private val isDetecting = AtomicBoolean(false)
 
     private val offsetState = DataProcessingUnit.DynamicOffsetState(
         stepPx = 2.0f, maxOffsetPx = 35f, decayFactor = 0.04f
     )
-
-    // ── متتبع الاستقرار: يُرسل ضغطة فقط إذا تأكد الهدف 2 إطارات متتالية ──
-    private var lastBodyCenter: PointF? = null
-    private var confirmCount   = 0
-    private val CONFIRM_NEEDED = 2
-
-    // =========================================================================
-    // دورة الحياة
-    // =========================================================================
 
     override fun onCreate() {
         super.onCreate()
@@ -96,7 +72,13 @@ class ScreenCaptureService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
-        val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+        // إصلاح: getParcelableExtra المتوافق مع API 33+
+        val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra(EXTRA_RESULT_DATA)
+        }
         if (resultCode == -1 || resultData == null) { stopSelf(); return START_NOT_STICKY }
 
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -105,7 +87,7 @@ class ScreenCaptureService : Service() {
 
         startWorkerThread()
         setupImageReader()
-        Log.i(TAG, "Body detection started — fast=${SCAN_FAST_MS}ms / slow=${SCAN_SLOW_MS}ms")
+        Log.i(TAG, "Body detection started — fast=${SCAN_FAST_MS}ms / manual=${SCAN_MANUAL_MS}ms")
         return START_STICKY
     }
 
@@ -123,25 +105,16 @@ class ScreenCaptureService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // =========================================================================
-    // إعداد ML Kit Pose Detector
-    // =========================================================================
-
     private fun initPoseDetector() {
         val options = PoseDetectorOptions.Builder()
             .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
             .build()
         poseDetector = PoseDetection.getClient(options)
-        Log.i(TAG, "ML Kit PoseDetector initialized (STREAM_MODE, on-device)")
     }
-
-    // =========================================================================
-    // إعداد VirtualDisplay
-    // =========================================================================
 
     private fun setupImageReader() {
         val m = resources.displayMetrics
-        val w = m.widthPixels / 2     // نصف الدقة — أسرع وأأمن
+        val w = m.widthPixels / 2
         val h = m.heightPixels / 2
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
@@ -152,26 +125,16 @@ class ScreenCaptureService : Service() {
         workerHandler?.postDelayed(scanRunnable, SCAN_SLOW_MS)
     }
 
-    // =========================================================================
-    // Runnable — تكيّفي + آمن
-    // =========================================================================
-
     private val scanRunnable = object : Runnable {
         override fun run() {
             if (!isRunning) return
             if (!isDetecting.compareAndSet(false, true)) {
-                // الكشف السابق لم ينته — تخطّ هذه الدورة
                 workerHandler?.postDelayed(this, SCAN_SLOW_MS)
                 return
             }
             processNextFrame()
-            // الجدولة التالية تتم داخل callback الكشف
         }
     }
-
-    // =========================================================================
-    // معالجة الإطار → ML Kit Pose Detection
-    // =========================================================================
 
     private fun processNextFrame() {
         val image = imageReader?.acquireLatestImage()
@@ -194,7 +157,6 @@ class ScreenCaptureService : Service() {
             frameBitmap = Bitmap.createBitmap(stride, h, Bitmap.Config.ARGB_8888)
             frameBitmap.copyPixelsFromBuffer(buf)
 
-            // تصغير 50% لتسريع ML Kit
             val sw = (w * SCALE_FACTOR).toInt()
             val sh = (h * SCALE_FACTOR).toInt()
             scaledBitmap = Bitmap.createScaledBitmap(frameBitmap, sw, sh, true)
@@ -208,7 +170,10 @@ class ScreenCaptureService : Service() {
                     capturedScaled.recycle()
                     handlePoseResult(pose, w, h)
                     isDetecting.set(false)
-                    val delay = if (detectedBodies > 0) SCAN_FAST_MS else SCAN_SLOW_MS
+                    // جدولة الإطار التالي حسب وجود هدف
+                    val delay = if (detectedBodies > 0) SCAN_FAST_MS else {
+                        if (TargetStore.hasManualTarget) SCAN_MANUAL_MS else SCAN_SLOW_MS
+                    }
                     workerHandler?.postDelayed(scanRunnable, delay)
                 }
                 ?.addOnFailureListener { e ->
@@ -234,33 +199,31 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    // =========================================================================
-    // تحليل نتيجة Pose Detection
-    // =========================================================================
-
     private fun handlePoseResult(pose: Pose, frameW: Int, frameH: Int) {
-        // فلتر النقاط عالية الثقة فقط
         val goodLandmarks = pose.allPoseLandmarks.filter {
             it.inFrameLikelihood >= LANDMARK_CONFIDENCE
         }
 
         if (goodLandmarks.size < MIN_LANDMARKS) {
             detectedBodies = 0
-            confirmCount   = 0
-            lastBodyCenter = null
-            updateNotification("لم يُكتشف جسم بشري")
+            updateNotification(
+                if (TargetStore.hasManualTarget)
+                    "📍 لا جسم — يضغط الهدف اليدوي (${TargetStore.manualX.toInt()},${TargetStore.manualY.toInt()})"
+                else "لم يُكتشف جسم بشري"
+            )
+            // ضغط الهدف اليدوي فوراً إن وُجد
+            if (TargetStore.hasManualTarget) dispatchManualTap()
             return
         }
 
+        // ── جسم بشري مكتشف → اضغط فوراً بدون تأخير ─────────────────────
         detectedBodies = 1
 
-        // حساب Bounding Box من أقصى إحداثيات النقاط المكتشفة
         val xs = goodLandmarks.map { it.position.x / SCALE_FACTOR }
         val ys = goodLandmarks.map { it.position.y / SCALE_FACTOR }
         val xMin = xs.min(); val xMax = xs.max()
         val yMin = ys.min(); val yMax = ys.max()
 
-        // توسيع الصندوق بهامش 10% لشمول حواف الجسم
         val padX = (xMax - xMin) * 0.10f
         val padY = (yMax - yMin) * 0.10f
         val box = floatArrayOf(
@@ -270,58 +233,25 @@ class ScreenCaptureService : Service() {
             (yMax + padY).coerceAtMost(frameH.toFloat())
         )
 
-        // نقطة الاستهداف الذكية: مركز الجسم العلوي (منتصف الكتفين إن وُجدا، وإلا مركز الصندوق)
         val smartCenter = getSmartTargetPoint(pose, box)
+        val confidence  = (goodLandmarks.size * 100f / 33f).toInt()
 
-        // نظام التأكيد المزدوج — يُرسل ضغطة بعد إطارين متتاليين للتأكد من الهدف
-        val prev = lastBodyCenter
-        if (prev != null && abs(smartCenter.x - prev.x) < 80f && abs(smartCenter.y - prev.y) < 80f) {
-            confirmCount++
-        } else {
-            confirmCount = 1
-        }
-        lastBodyCenter = smartCenter
+        updateNotification("🎯 جسم مكتشف ✓  ثقة: $confidence%  — يضغط الآن")
+        Log.i(TAG, "Body → center=(${smartCenter.x.toInt()},${smartCenter.y.toInt()}) conf=$confidence%")
 
-        val confidence = (goodLandmarks.size * 100f / 33f).toInt()
-        updateNotification("جسم مكتشف ✓  ثقة: $confidence%  نقاط: ${goodLandmarks.size}/33")
-        Log.i(TAG, "Body at box=(${xMin.toInt()},${yMin.toInt()},${xMax.toInt()},${yMax.toInt()}) " +
-                   "center=(${smartCenter.x.toInt()},${smartCenter.y.toInt()}) " +
-                   "confidence=$confidence% confirm=$confirmCount")
-
-        if (confirmCount >= CONFIRM_NEEDED) {
-            dispatchTap(box, frameW, frameH)
-        }
+        // ضغط فوري بدون أي تأكيد مزدوج
+        dispatchTap(box, frameW, frameH)
     }
 
-    /**
-     * يختار نقطة الاستهداف الأذكى:
-     * 1. منتصف الكتفين إن كانا مكتشفَين بثقة عالية
-     * 2. وإلا مركز الصدر (منتصف الصندوق أفقياً، الثلث العلوي عمودياً)
-     */
     private fun getSmartTargetPoint(pose: Pose, box: FloatArray): PointF {
-        val lShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
-        val rShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
-
-        return if (lShoulder != null && rShoulder != null &&
-            lShoulder.inFrameLikelihood >= LANDMARK_CONFIDENCE &&
-            rShoulder.inFrameLikelihood >= LANDMARK_CONFIDENCE) {
-            PointF(
-                ((lShoulder.position.x + rShoulder.position.x) / 2f) / SCALE_FACTOR,
-                ((lShoulder.position.y + rShoulder.position.y) / 2f) / SCALE_FACTOR
-            )
-        } else {
-            // مركز الثلث العلوي من الصندوق (منطقة الصدر/الرأس)
-            PointF(
-                (box[0] + box[2]) / 2f,
-                box[1] + (box[3] - box[1]) * 0.30f
-            )
-        }
+        // مركز الجسم بالضبط (منتصف الـ bounding box)
+        return PointF(
+            (box[0] + box[2]) / 2f,
+            (box[1] + box[3]) / 2f
+        )
     }
 
-    // =========================================================================
-    // إرسال الضغطة عبر DPU + UiAutomationService
-    // =========================================================================
-
+    // ── ضغط الجسم المكتشف ────────────────────────────────────────────────
     private fun dispatchTap(box: FloatArray, frameW: Int, frameH: Int) {
         UiAutomationService.instance?.tapBestTarget(
             rawBoxes     = listOf(box),
@@ -332,9 +262,13 @@ class ScreenCaptureService : Service() {
         ) ?: Log.w(TAG, "UiAutomationService not ready")
     }
 
-    // =========================================================================
-    // مساعدات
-    // =========================================================================
+    // ── ضغط الهدف اليدوي ─────────────────────────────────────────────────
+    private fun dispatchManualTap() {
+        val x = TargetStore.manualX
+        val y = TargetStore.manualY
+        FloatingTapIndicator.instance?.moveTo(x, y)
+        UiAutomationService.instance?.tap(x, y) ?: Log.w(TAG, "UiAutomationService not ready")
+    }
 
     private fun startWorkerThread() {
         workerThread = HandlerThread("PoseDetectWorker", android.os.Process.THREAD_PRIORITY_BACKGROUND)
