@@ -11,7 +11,6 @@
         android:padding="24dp"
         android:gravity="center_horizontal">
 
-        <!-- Header -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -25,7 +24,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Automation Framework v1.0.3"
+            android:text="Automation Framework v1.0.5"
             android:textColor="#8B949E"
             android:textSize="13sp"
             android:layout_marginBottom="20dp"/>
@@ -54,11 +53,72 @@
         <View android:layout_width="match_parent" android:layout_height="1dp"
             android:background="#30404D" android:layout_marginBottom="20dp"/>
 
-        <!-- Template Matching Section -->
+        <!-- ══ قسم الهدف اليدوي ══════════════════════════════════════════ -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="مطابقة القوالب البصرية"
+            android:text="نقطة الضغط اليدوية"
+            android:textColor="#58A6FF"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="اضغط الزر ثم المس الشاشة لتحديد المكان"
+            android:textColor="#8B949E"
+            android:textSize="12sp"
+            android:layout_marginBottom="12dp"/>
+
+        <TextView
+            android:id="@+id/tvManualTarget"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="لم يُحدَّد هدف بعد"
+            android:textColor="#8B949E"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:background="#161B22"
+            android:padding="10dp"
+            android:layout_marginBottom="12dp"/>
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPickTarget"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📍 حدد نقطة الضغط"
+                android:textColor="#0D1117"
+                android:backgroundTint="#58A6FF"
+                android:paddingHorizontal="20dp"
+                android:layout_marginEnd="10dp"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnClearTarget"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="✕ مسح"
+                android:textColor="#0D1117"
+                android:backgroundTint="#6E7681"
+                android:paddingHorizontal="16dp"/>
+        </LinearLayout>
+
+        <!-- Divider -->
+        <View android:layout_width="match_parent" android:layout_height="1dp"
+            android:background="#30404D"
+            android:layout_marginTop="20dp"
+            android:layout_marginBottom="20dp"/>
+
+        <!-- ══ قسم المسح التلقائي ════════════════════════════════════════ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="المسح التلقائي — اكتشاف الجسم البشري"
             android:textColor="#3FB950"
             android:textSize="16sp"
             android:textStyle="bold"
@@ -67,7 +127,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="MediaProjection + SSD Template Matching"
+            android:text="MediaProjection + ML Kit Pose Detection"
             android:textColor="#8B949E"
             android:textSize="12sp"
             android:layout_marginBottom="16dp"/>
@@ -104,7 +164,7 @@
             android:layout_marginTop="24dp"
             android:layout_marginBottom="20dp"/>
 
-        <!-- DPU Section -->
+        <!-- ══ قسم DPU ════════════════════════════════════════════════════ -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
