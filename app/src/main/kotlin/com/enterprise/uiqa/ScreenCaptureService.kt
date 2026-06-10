@@ -203,19 +203,16 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        // حساب مركز الجسم
-        val xs     = goodLandmarks.map { it.position.x }
-        val ys     = goodLandmarks.map { it.position.y }
-        val bodyX  = (xs.min() + xs.max()) / 2f
-        val bodyY  = (ys.min() + ys.max()) / 2f
-
-        // ── شرط الوسط: الجسم لازم يكون في منتصف الشاشة (40% × 40%) ──────
+        // ── شرط الوسط: أي نقطة من الجسم تدخل المنطقة الوسطى ────────────
         val leftBound  = frameW * CENTER_MARGIN
         val rightBound = frameW * (1f - CENTER_MARGIN)
         val topBound   = frameH * CENTER_MARGIN
         val botBound   = frameH * (1f - CENTER_MARGIN)
 
-        val inCenter = bodyX in leftBound..rightBound && bodyY in topBound..botBound
+        val inCenter = goodLandmarks.any { lm ->
+            lm.position.x in leftBound..rightBound &&
+            lm.position.y in topBound..botBound
+        }
 
         if (!inCenter) {
             // جسم موجود لكن على الأطراف → أوقف
