@@ -1,26 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    إعداد آمن لخدمة الوصول — v1.0.4
+    يستقبل فقط أحداث تغيير النافذة بدون اعتراض اللمس أو الكيبورد
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
 
     android:description="@string/accessibility_service_description"
 
     android:accessibilityEventTypes="
-        typeAllMask"
+        typeWindowStateChanged|
+        typeWindowContentChanged"
 
     android:accessibilityFlags="
         flagDefault|
         flagRetrieveInteractiveWindows|
-        flagRequestTouchExplorationMode|
-        flagRequestFilterKeyEvents|
-        flagReportViewIds|
-        flagRequestEnhancedWebAccessibility"
+        flagReportViewIds"
 
     android:accessibilityFeedbackType="feedbackGeneric"
 
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
-    android:canRequestTouchExplorationMode="true"
-    android:canRequestFilterKeyEvents="true"
-    android:canRequestEnhancedWebAccessibility="true"
 
-    android:notificationTimeout="100"
+    android:notificationTimeout="500"
+
     android:packageNames="" />
