@@ -11,7 +11,7 @@
         android:padding="24dp"
         android:gravity="center_horizontal">
 
-        <!-- ── Header ── -->
+        <!-- Header -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -25,18 +25,18 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Automation Framework v1.0.2"
+            android:text="Automation Framework v1.0.3"
             android:textColor="#8B949E"
             android:textSize="13sp"
-            android:layout_marginBottom="24dp"/>
+            android:layout_marginBottom="20dp"/>
 
-        <!-- ── Accessibility Status ── -->
+        <!-- Accessibility Status -->
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="جاري الفحص..."
-            android:textSize="15sp"
+            android:textSize="14sp"
             android:textStyle="bold"
             android:layout_marginBottom="12dp"/>
 
@@ -47,16 +47,64 @@
             android:text="فتح إعدادات إمكانية الوصول"
             android:textColor="#0D1117"
             android:backgroundTint="#58A6FF"
-            android:paddingHorizontal="24dp"
-            android:layout_marginBottom="32dp"/>
+            android:paddingHorizontal="20dp"
+            android:layout_marginBottom="24dp"/>
 
-        <!-- ── DPU Section ── -->
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
+        <!-- Divider -->
+        <View android:layout_width="match_parent" android:layout_height="1dp"
+            android:background="#30404D" android:layout_marginBottom="20dp"/>
+
+        <!-- Template Matching Section -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="مطابقة القوالب البصرية"
+            android:textColor="#3FB950"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="MediaProjection + SSD Template Matching"
+            android:textColor="#8B949E"
+            android:textSize="12sp"
+            android:layout_marginBottom="16dp"/>
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnStartCapture"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="▶  بدء المسح"
+                android:textColor="#0D1117"
+                android:backgroundTint="#3FB950"
+                android:paddingHorizontal="24dp"
+                android:layout_marginEnd="12dp"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnStopCapture"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="⏹  إيقاف"
+                android:textColor="#0D1117"
+                android:backgroundTint="#F85149"
+                android:paddingHorizontal="24dp"
+                android:enabled="false"/>
+        </LinearLayout>
+
+        <!-- Divider -->
+        <View android:layout_width="match_parent" android:layout_height="1dp"
             android:background="#30404D"
+            android:layout_marginTop="24dp"
             android:layout_marginBottom="20dp"/>
 
+        <!-- DPU Section -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -64,7 +112,7 @@
             android:textColor="#F0A500"
             android:textSize="16sp"
             android:textStyle="bold"
-            android:layout_marginBottom="8dp"/>
+            android:layout_marginBottom="4dp"/>
 
         <TextView
             android:layout_width="wrap_content"
@@ -82,9 +130,8 @@
             android:textColor="#0D1117"
             android:backgroundTint="#F0A500"
             android:paddingHorizontal="32dp"
-            android:layout_marginBottom="20dp"/>
+            android:layout_marginBottom="16dp"/>
 
-        <!-- نتائج DPU -->
         <TextView
             android:id="@+id/tvDpu"
             android:layout_width="match_parent"
