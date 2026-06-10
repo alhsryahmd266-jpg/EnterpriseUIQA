@@ -2,11 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.enterprise.uiqa">
 
-    <!-- ===== تصاريح إلزامية للخدمة ===== -->
     <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
@@ -21,7 +21,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.EnterpriseUIQA">
 
-        <!-- ===== الـ Activity الرئيسي ===== -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -31,7 +30,6 @@
             </intent-filter>
         </activity>
 
-        <!-- ===== خدمة الوصول المخصصة ===== -->
         <service
             android:name=".UiAutomationService"
             android:exported="true"
@@ -45,7 +43,11 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- ===== استقبال إعادة التشغيل ===== -->
+        <service
+            android:name=".ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
