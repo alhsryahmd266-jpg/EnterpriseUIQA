@@ -13,17 +13,11 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 
-/**
- * FloatingTapIndicator v2 — زرار عائم قابل للسحب
- *
- * المستخدم يسحبه لأي مكان. عند تفعيل المسح يومض باللون الأخضر.
- * عند التوقف يرجع أحمر. يحدّث TargetStore تلقائياً عند السحب.
- */
 class FloatingTapIndicator(private val context: Context) {
 
     companion object {
         private const val TAG  = "FloatingTapIndicator"
-        private const val SIZE = 90   // حجم الزرار بالبكسل
+        private const val SIZE = 90
         @Volatile var instance: FloatingTapIndicator? = null
     }
 
@@ -33,7 +27,6 @@ class FloatingTapIndicator(private val context: Context) {
     private var layoutParams: WindowManager.LayoutParams? = null
     private var isActive = false
 
-    // ── رسم الزرار ────────────────────────────────────────────────────────
     private inner class CursorView(ctx: Context) : View(ctx) {
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
         private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -58,7 +51,6 @@ class FloatingTapIndicator(private val context: Context) {
         }
     }
 
-    // ── إظهار الزرار ───────────────────────────────────────────────────────
     fun show() {
         uiHandler.post {
             if (cursorView != null) return@post
@@ -72,10 +64,8 @@ class FloatingTapIndicator(private val context: Context) {
                     PixelFormat.TRANSLUCENT
                 ).apply { gravity = Gravity.TOP or Gravity.START; x = 80; y = 400 }
 
-                // حفظ موضع أولي في TargetStore
                 TargetStore.set(80f + SIZE / 2f, 400f + SIZE / 2f)
 
-                // ── السحب ─────────────────────────────────────────────────
                 var initX = 0; var initY = 0
                 var initTX = 0f; var initTY = 0f
 
@@ -107,7 +97,23 @@ class FloatingTapIndicator(private val context: Context) {
         }
     }
 
-    // ── تفعيل وضع الضغط (أخضر + نبض) ─────────────────────────────────────
+    /** تحريك الزرار العائم لموضع جديد على الشاشة */
+    fun moveTo(x: Float, y: Float) {
+        uiHandler.post {
+            val params = layoutParams ?: return@post
+            val view   = cursorView   ?: return@post
+            params.x = (x - SIZE / 2f).toInt().coerceAtLeast(0)
+            params.y = (y - SIZE / 2f).toInt().coerceAtLeast(0)
+            try {
+                windowManager.updateViewLayout(view, params)
+                TargetStore.set(x, y)
+                Log.d(TAG, "moveTo(${x.toInt()},${y.toInt()})")
+            } catch (e: Exception) {
+                Log.w(TAG, "moveTo failed: ${e.message}")
+            }
+        }
+    }
+
     fun setActive(active: Boolean) {
         uiHandler.post {
             val view = cursorView ?: return@post
@@ -127,7 +133,6 @@ class FloatingTapIndicator(private val context: Context) {
         }.start()
     }
 
-    // ── إخفاء الزرار ───────────────────────────────────────────────────────
     fun dismiss() {
         uiHandler.post {
             cursorView?.let {
