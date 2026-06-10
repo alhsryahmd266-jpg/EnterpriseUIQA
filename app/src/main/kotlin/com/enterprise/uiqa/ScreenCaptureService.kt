@@ -22,9 +22,23 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
 import com.google.mlkit.vision.pose.PoseDetector
+import com.google.mlkit.vision.pose.PoseLandmark
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * ScreenCaptureService — Game Loop الكامل
+ *
+ * الدورة:
+ *  1. ML Kit يكشف جسم بشري (كل 80ms)
+ *  2. AimEngine يحسب swipe التصويب
+ *  3. UiAutomationService ينفّذ swipe التصويب (يمين الشاشة)
+ *  4. بعد الـ aim يضغط زرار النار فوراً
+ *  5. MovementEngine يحرك الـ joystick (يسار)
+ *  6. ResearchLogger يسجّل كل حدث
+ *
+ *  رد الفعل الكلي: ~30ms (يتفوق على إنسان 150-300ms)
+ */
 class ScreenCaptureService : Service() {
 
     companion object {
@@ -32,21 +46,28 @@ class ScreenCaptureService : Service() {
         private const val NOTIF_CHANNEL_ID = "screen_capture_channel"
         private const val NOTIF_ID         = 1001
 
-        private const val SCAN_INTERVAL_MS  = 400L   // ML Kit كل 400ms — لا تسخين
-        private const val TAP_INTERVAL_MS   = 100L   // ضغط كل 100ms عند وجود جسم
-        private const val SCALE_FACTOR      = 0.4f   // تصغير 40% لتوفير الباتري
+        private const val SCAN_INTERVAL_MS  = 80L    // كشف كل 80ms = ~12 fps
+        private const val SCALE_FACTOR      = 0.4f
 
         private const val LANDMARK_CONFIDENCE = 0.50f
         private const val MIN_LANDMARKS        = 4
-
-        // منطقة الوسط: 30% من كل جانب (يعني الوسط 40% من الشاشة)
-        private const val CENTER_MARGIN = 0.475f
+        private const val CENTER_MARGIN        = 0.475f
 
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
 
         @Volatile var isRunning      = false
         @Volatile var detectedBodies = 0
+
+        // ── إعدادات مواضع اللعبة (قابلة للضبط حسب الجهاز) ──────────────────
+        // مركز منطقة التصويب (يمين الشاشة)
+        var aimOriginXRatio  = 0.75f   // 75% من العرض
+        var aimOriginYRatio  = 0.50f   // وسط الارتفاع
+        // زرار النار
+        var fireButtonXRatio = 0.82f
+        var fireButtonYRatio = 0.68f
+        // حساسية التصويب (px swipe لكل px فرق)
+        var aimSensitivity   = 6f
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -55,55 +76,46 @@ class ScreenCaptureService : Service() {
     private var workerThread: HandlerThread?       = null
     private var workerHandler: Handler?            = null
     private var poseDetector: PoseDetector?        = null
+    private val isDetecting = AtomicBoolean(false)
 
-    private val isDetecting  = AtomicBoolean(false)
-    private val isTapping    = AtomicBoolean(false)
-
-    // ── loop الضغط السريع منفصل عن ML Kit ──────────────────────────────────
-    private val tapRunnable = object : Runnable {
-        override fun run() {
-            if (!isRunning || !isTapping.get()) return
-            dispatchTap()
-            workerHandler?.postDelayed(this, TAP_INTERVAL_MS)
-        }
-    }
+    private var screenW = 0
+    private var screenH = 0
 
     override fun onCreate() {
         super.onCreate()
+        val m = resources.displayMetrics
+        screenW = m.widthPixels; screenH = m.heightPixels
         createNotificationChannel()
-        startForeground(NOTIF_ID, buildNotification("جاهز — في انتظار تفعيل المسح"))
+        startForeground(NOTIF_ID, buildNotification("جاهز"))
         initPoseDetector()
+        ResearchLogger.reset()
         isRunning = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
-        val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-        } else {
-            @Suppress("DEPRECATION") intent?.getParcelableExtra(EXTRA_RESULT_DATA)
-        }
+        else @Suppress("DEPRECATION") intent?.getParcelableExtra(EXTRA_RESULT_DATA)
+
         if (resultCode == -1 || resultData == null) { stopSelf(); return START_NOT_STICKY }
 
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mgr.getMediaProjection(resultCode, resultData)
         mediaProjection?.registerCallback(projectionCallback, null)
-
         startWorkerThread()
         setupImageReader()
-        Log.i(TAG, "Started — scan=${SCAN_INTERVAL_MS}ms tap=${TAP_INTERVAL_MS}ms")
         return START_STICKY
     }
 
     override fun onDestroy() {
         isRunning = false
-        stopTapping()
         workerHandler?.removeCallbacks(scanRunnable)
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
-        poseDetector?.close()
+        virtualDisplay?.release(); imageReader?.close()
+        mediaProjection?.stop(); poseDetector?.close()
         workerThread?.quitSafely()
+        MovementEngine.reset(); AimEngine.clearHistory()
+        Log.i(TAG, ResearchLogger.report())
         super.onDestroy()
     }
 
@@ -111,32 +123,28 @@ class ScreenCaptureService : Service() {
 
     private fun initPoseDetector() {
         poseDetector = PoseDetection.getClient(
-            PoseDetectorOptions.Builder()
-                .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
-                .build()
+            PoseDetectorOptions.Builder().setDetectorMode(PoseDetectorOptions.STREAM_MODE).build()
         )
     }
 
     private fun setupImageReader() {
-        val m = resources.displayMetrics
-        val w = (m.widthPixels  * SCALE_FACTOR).toInt()
-        val h = (m.heightPixels * SCALE_FACTOR).toInt()
+        val w = (screenW * SCALE_FACTOR).toInt()
+        val h = (screenH * SCALE_FACTOR).toInt()
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "UIQACapture", w, h, m.densityDpi,
+            "UIQACapture", w, h, resources.displayMetrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader!!.surface, null, workerHandler
         )
         workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS)
     }
 
-    // ── ML Kit scan loop ────────────────────────────────────────────────────
+    // ── Scan Loop ───────────────────────────────────────────────────────────
     private val scanRunnable = object : Runnable {
         override fun run() {
             if (!isRunning) return
             if (!isDetecting.compareAndSet(false, true)) {
-                workerHandler?.postDelayed(this, SCAN_INTERVAL_MS)
-                return
+                workerHandler?.postDelayed(this, SCAN_INTERVAL_MS); return
             }
             processNextFrame()
         }
@@ -146,24 +154,19 @@ class ScreenCaptureService : Service() {
         val image = imageReader?.acquireLatestImage()
         if (image == null) {
             isDetecting.set(false)
-            workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS)
-            return
+            workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS); return
         }
-        var frame: Bitmap? = null
-        var scaled: Bitmap? = null
+        var frame: Bitmap? = null; var scaled: Bitmap? = null
         try {
-            val plane  = image.planes[0]
-            val stride = plane.rowStride / plane.pixelStride
-            frame  = Bitmap.createBitmap(stride, image.height, Bitmap.Config.ARGB_8888)
+            val plane = image.planes[0]
+            frame = Bitmap.createBitmap(plane.rowStride / plane.pixelStride,
+                image.height, Bitmap.Config.ARGB_8888)
             frame.copyPixelsFromBuffer(plane.buffer)
             scaled = Bitmap.createScaledBitmap(frame, image.width, image.height, false)
             frame.recycle(); frame = null
-
-            val inputImage   = InputImage.fromBitmap(scaled, 0)
             val capturedBitmap = scaled
             val fw = image.width; val fh = image.height
-
-            poseDetector?.process(inputImage)
+            poseDetector?.process(InputImage.fromBitmap(scaled, 0))
                 ?.addOnSuccessListener { pose ->
                     capturedBitmap.recycle()
                     handlePoseResult(pose, fw, fh)
@@ -171,92 +174,168 @@ class ScreenCaptureService : Service() {
                     workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS)
                 }
                 ?.addOnFailureListener {
-                    capturedBitmap.recycle()
-                    isDetecting.set(false)
+                    capturedBitmap.recycle(); isDetecting.set(false)
                     workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS)
                 }
                 ?: run { scaled.recycle(); isDetecting.set(false); workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS) }
-
         } catch (e: Exception) {
-            frame?.recycle(); scaled?.recycle()
-            isDetecting.set(false)
+            frame?.recycle(); scaled?.recycle(); isDetecting.set(false)
             workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS)
-        } finally {
-            image.close()
-        }
+        } finally { image.close() }
     }
 
-    // ── تحليل نتيجة Pose — مع شرط الوسط ────────────────────────────────────
+    // ── Game Loop الكامل ────────────────────────────────────────────────────
     private fun handlePoseResult(pose: Pose, frameW: Int, frameH: Int) {
         val goodLandmarks = pose.allPoseLandmarks.filter {
             it.inFrameLikelihood >= LANDMARK_CONFIDENCE
         }
 
         if (goodLandmarks.size < MIN_LANDMARKS) {
-            // لا جسم → أوقف الضغط فوراً
+            // لا هدف → حركة دورية
             if (detectedBodies != 0) {
                 detectedBodies = 0
-                stopTapping()
-                updateNotification("لم يُكتشف جسم بشري في المنطقة الوسطى")
-                Log.i(TAG, "Body gone → tapping stopped")
+                FloatingTapIndicator.instance?.setActive(false)
+                AimEngine.clearHistory()
+                updateNotification("دورية — لا هدف")
             }
+            executeMovement(hasTarget = false, targetDist = 0f)
             return
         }
 
-        // ── شرط الوسط: أي نقطة من الجسم تدخل المنطقة الوسطى ────────────
+        // ── حساب مركز الهدف ─────────────────────────────────────────────────
+        val targetPoint = getTargetPoint(pose, goodLandmarks, frameW, frameH)
+
+        // ── شرط منطقة التصويب ───────────────────────────────────────────────
         val leftBound  = frameW * CENTER_MARGIN
         val rightBound = frameW * (1f - CENTER_MARGIN)
         val topBound   = frameH * CENTER_MARGIN
         val botBound   = frameH * (1f - CENTER_MARGIN)
 
-        val inCenter = goodLandmarks.any { lm ->
-            lm.position.x in leftBound..rightBound &&
-            lm.position.y in topBound..botBound
+        val anyInCenter = goodLandmarks.any { lm ->
+            lm.position.x in leftBound..rightBound && lm.position.y in topBound..botBound
         }
 
-        if (!inCenter) {
-            // جسم موجود لكن على الأطراف → أوقف
-            if (isTapping.get()) {
-                stopTapping()
-                detectedBodies = 0
-                updateNotification("جسم على الأطراف — في انتظار المنتصف")
-            }
+        if (!anyInCenter) {
+            // هدف على الأطراف → صوّب عليه (حرّك الكاميرا)
+            executeAim(targetPoint.x / SCALE_FACTOR, targetPoint.y / SCALE_FACTOR,
+                tracked = false)
+            executeMovement(hasTarget = true,
+                targetDist = targetPoint.y.let { (frameH / 2f - it).let { d -> d * d } }
+                    .let { Math.sqrt(it.toDouble()).toFloat() })
             return
         }
 
-        // ── جسم في الوسط ✓ → ابدأ الضغط ─────────────────────────────────
+        // ── هدف في المنطقة ✓ → كشف + تصويب + نار ───────────────────────────
         detectedBodies = 1
+        ResearchLogger.onDetection()
+        FloatingTapIndicator.instance?.setActive(true)
+
+        val realX = targetPoint.x / SCALE_FACTOR
+        val realY = targetPoint.y / SCALE_FACTOR
+        val dist  = Math.hypot((realX - screenW / 2.0), (realY - screenH / 2.0)).toFloat()
+
         val conf = (goodLandmarks.size * 100f / 33f).toInt()
-        if (!isTapping.get()) {
-            startTapping()
-            Log.i(TAG, "Body in CENTER → tapping started  conf=$conf%  pos=(${bodyX.toInt()},${bodyY.toInt()})")
-        }
-        updateNotification("🎯 جسم في الوسط ✓  ثقة: $conf%  — يضغط الآن")
+        updateNotification("🎯 هدف في الوسط ✓ ثقة:$conf% → يصوّب ويطلق")
+        Log.i(TAG, "TARGET → pos=(${realX.toInt()},${realY.toInt()}) conf=$conf%")
+
+        // 1. تصويب
+        executeAim(realX, realY, tracked = true)
+
+        // 2. إطلاق نار (بعد 30ms من التصويب)
+        workerHandler?.postDelayed({ executeFire() }, 30L)
+
+        // 3. حركة جانبية أثناء الاشتباك
+        executeMovement(hasTarget = true, targetDist = dist)
     }
 
-    // ── إدارة loop الضغط ───────────────────────────────────────────────────
-    private fun startTapping() {
-        if (isTapping.compareAndSet(false, true)) {
-            FloatingTapIndicator.instance?.setActive(true)
-            workerHandler?.post(tapRunnable)
+    // ── التصويب ─────────────────────────────────────────────────────────────
+    private fun executeAim(targetX: Float, targetY: Float, tracked: Boolean) {
+        val aimOriginX = screenW * aimOriginXRatio
+        val aimOriginY = screenH * aimOriginYRatio
+
+        val aim = AimEngine.compute(
+            targetX = targetX, targetY = targetY,
+            aimOriginX = aimOriginX, aimOriginY = aimOriginY,
+            screenW = screenW, screenH = screenH,
+            sensitivityPx = aimSensitivity
+        )
+
+        if (aim.needsAim) {
+            ResearchLogger.onAim(aim.distance)
+            UiAutomationService.instance?.swipe(
+                aim.startX, aim.startY, aim.endX, aim.endY, aim.durationMs
+            )
+            FloatingTapIndicator.instance?.moveTo(targetX, targetY)
         }
     }
 
-    private fun stopTapping() {
-        if (isTapping.compareAndSet(true, false)) {
-            workerHandler?.removeCallbacks(tapRunnable)
-            FloatingTapIndicator.instance?.setActive(false)
+    // ── إطلاق النار ─────────────────────────────────────────────────────────
+    private fun executeFire() {
+        if (!isRunning) return
+        val fireX = screenW * fireButtonXRatio
+        val fireY = screenH * fireButtonYRatio
+        ResearchLogger.onShot()
+        UiAutomationService.instance?.tap(fireX, fireY)
+        TargetStore.tapCount++
+    }
+
+    // ── الحركة ──────────────────────────────────────────────────────────────
+    private fun executeMovement(hasTarget: Boolean, targetDist: Float) {
+        val move = MovementEngine.compute(
+            hasTarget = hasTarget, targetDist = targetDist,
+            screenW = screenW, screenH = screenH
+        )
+        if (move.durationMs > 0L) {
+            ResearchLogger.onMove()
+            UiAutomationService.instance?.swipe(
+                move.joyStartX, move.joyStartY,
+                move.joyEndX, move.joyEndY,
+                move.durationMs
+            )
         }
     }
 
-    private fun dispatchTap() {
-        if (!TargetStore.hasManualTarget) return
-        UiAutomationService.instance?.tap(TargetStore.manualX, TargetStore.manualY)
-            ?: Log.w(TAG, "UiAutomationService not ready")
+    // ── نقطة الاستهداف حسب جزء الجسم ────────────────────────────────────────
+    private fun getTargetPoint(pose: Pose, landmarks: List<com.google.mlkit.vision.pose.PoseLandmark>,
+                                frameW: Int, frameH: Int): android.graphics.PointF {
+        return when (TargetStore.targetPart) {
+            TargetStore.TargetPart.HEAD -> {
+                val nose = pose.getPoseLandmark(PoseLandmark.NOSE)
+                if (nose != null && nose.inFrameLikelihood >= LANDMARK_CONFIDENCE)
+                    android.graphics.PointF(nose.position.x, nose.position.y)
+                else centerOfLandmarks(landmarks)
+            }
+            TargetStore.TargetPart.CHEST -> {
+                val l = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
+                val r = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
+                if (l != null && r != null &&
+                    l.inFrameLikelihood >= LANDMARK_CONFIDENCE &&
+                    r.inFrameLikelihood >= LANDMARK_CONFIDENCE)
+                    android.graphics.PointF((l.position.x + r.position.x) / 2f,
+                        (l.position.y + r.position.y) / 2f + 40f)
+                else centerOfLandmarks(landmarks)
+            }
+            TargetStore.TargetPart.HANDS -> {
+                val lw = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)
+                val rw = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)
+                val best = listOfNotNull(lw, rw)
+                    .filter { it.inFrameLikelihood >= LANDMARK_CONFIDENCE }
+                    .minByOrNull { it.position.y }
+                if (best != null) android.graphics.PointF(best.position.x, best.position.y)
+                else centerOfLandmarks(landmarks)
+            }
+            else -> centerOfLandmarks(landmarks)
+        }
     }
+
+    private fun centerOfLandmarks(lms: List<com.google.mlkit.vision.pose.PoseLandmark>) =
+        android.graphics.PointF(
+            lms.map { it.position.x }.average().toFloat(),
+            lms.map { it.position.y }.average().toFloat()
+        )
 
     private fun startWorkerThread() {
-        workerThread = HandlerThread("PoseDetectWorker",
+        workerThread = HandlerThread("GameLoopWorker",
             android.os.Process.THREAD_PRIORITY_BACKGROUND).apply { start() }
         workerHandler = Handler(workerThread!!.looper)
     }
@@ -265,20 +344,20 @@ class ScreenCaptureService : Service() {
         override fun onStop() { stopSelf() }
     }
 
-    private fun updateNotification(status: String) =
+    private fun updateNotification(s: String) =
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-            .notify(NOTIF_ID, buildNotification(status))
+            .notify(NOTIF_ID, buildNotification(s))
 
     private fun createNotificationChannel() {
-        val ch = NotificationChannel(NOTIF_CHANNEL_ID, "UI QA Body Detection",
-            NotificationManager.IMPORTANCE_LOW)
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(NotificationChannel(NOTIF_CHANNEL_ID,
+                "UI QA Game Loop", NotificationManager.IMPORTANCE_LOW))
     }
 
-    private fun buildNotification(status: String): Notification =
+    private fun buildNotification(s: String): Notification =
         NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
-            .setContentTitle("UI QA — اكتشاف الجسم البشري")
-            .setContentText(status)
+            .setContentTitle("Enterprise UI QA — Game Loop")
+            .setContentText(s)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true).build()
 }
