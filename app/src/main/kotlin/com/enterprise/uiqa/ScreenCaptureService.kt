@@ -6,8 +6,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
+import android.graphics.PointF
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -18,17 +18,27 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.pose.Pose
+import com.google.mlkit.vision.pose.PoseDetection
+import com.google.mlkit.vision.pose.PoseDetector
+import com.google.mlkit.vision.pose.PoseLandmark
+import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 /**
- * ScreenCaptureService — النسخة الآمنة (v1.0.4)
+ * ScreenCaptureService v1.0.5 — اكتشاف الجسم البشري الكامل
  *
- * إصلاحات الأمان:
- *  • تصغير الإطار 4× قبل المطابقة (يُقلّل العمليات 16 مرة)
- *  • حد أدنى للمسح 1500ms — لا يبدأ مسح جديد قبل انتهاء السابق
- *  • مفتاح AtomicBoolean يمنع تشغيل مسحين في نفس الوقت
- *  • تحرير فوري للـ Bitmap بعد كل إطار
- *  • توقف تلقائي إذا استغرق المسح أكثر من 800ms
+ * يستخدم ML Kit Pose Detection للتعرف على الجسم كاملاً (33 نقطة تشريحية)
+ * بدون إنترنت، ثم يمرر الإحداثيات لـ DataProcessingUnit وUiAutomationService.
+ *
+ * ضمانات الأمان:
+ *  • AtomicBoolean يمنع تشغيل كشفين في نفس الوقت
+ *  • تصغير الإطار 50% قبل الكشف لتسريع ML Kit
+ *  • تحرير Bitmap فوري بعد انتهاء كل عملية
+ *  • الكشف على BACKGROUND thread لا يلمس الـ UI thread
+ *  • معدل فحص تكيّفي: يسرع عند وجود هدف، يبطئ عند غيابه
  */
 class ScreenCaptureService : Service() {
 
@@ -36,34 +46,41 @@ class ScreenCaptureService : Service() {
         private const val TAG              = "ScreenCaptureService"
         private const val NOTIF_CHANNEL_ID = "screen_capture_channel"
         private const val NOTIF_ID         = 1001
-        private const val MATCH_THRESHOLD  = 0.85f
 
-        /** أبطأ مسح — لا يُضغط الـ CPU */
-        private const val SCAN_INTERVAL_MS = 1500L
+        // ── معدل الفحص التكيّفي ──────────────────────────────────────────
+        private const val SCAN_FAST_MS    = 300L    // عند اكتشاف هدف
+        private const val SCAN_SLOW_MS    = 1200L   // عند عدم وجود هدف
+        private const val SCALE_FACTOR    = 0.5f    // تصغير 50% قبل ML Kit
 
-        /** الحد الأقصى لوقت المسح — يُلغى إذا تجاوزه */
-        private const val MAX_SCAN_MS = 800L
-
-        /** نسبة التصغير — يُقلّل العمليات 16× */
-        private const val SCALE_FACTOR = 0.25f
+        // ── حدود جودة الكشف ──────────────────────────────────────────────
+        private const val LANDMARK_CONFIDENCE = 0.55f  // حد الثقة لكل نقطة
+        private const val MIN_LANDMARKS        = 5      // حد أدنى للنقاط المكتشفة
 
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
 
-        @Volatile var isRunning = false
+        @Volatile var isRunning    = false
+        @Volatile var detectedBodies = 0
     }
 
+    // ── حالة الخدمة ───────────────────────────────────────────────────────
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay?   = null
     private var imageReader: ImageReader?          = null
     private var workerThread: HandlerThread?       = null
     private var workerHandler: Handler?            = null
-    private var templateBitmap: Bitmap?            = null
-    private val isScanning = AtomicBoolean(false)   // يمنع تشغيل مسحين معاً
+    private var poseDetector: PoseDetector?        = null
+    private val isDetecting   = AtomicBoolean(false)
+    private var scanIntervalMs = SCAN_SLOW_MS
 
     private val offsetState = DataProcessingUnit.DynamicOffsetState(
-        stepPx = 2.5f, maxOffsetPx = 40f, decayFactor = 0.05f
+        stepPx = 2.0f, maxOffsetPx = 35f, decayFactor = 0.04f
     )
+
+    // ── متتبع الاستقرار: يُرسل ضغطة فقط إذا تأكد الهدف 2 إطارات متتالية ──
+    private var lastBodyCenter: PointF? = null
+    private var confirmCount   = 0
+    private val CONFIRM_NEEDED = 2
 
     // =========================================================================
     // دورة الحياة
@@ -72,10 +89,9 @@ class ScreenCaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIF_ID, buildNotification("جاهز — لم يبدأ المسح بعد"))
-        loadTemplate()
+        startForeground(NOTIF_ID, buildNotification("جاهز — في انتظار تفعيل المسح"))
+        initPoseDetector()
         isRunning = true
-        Log.i(TAG, "ScreenCaptureService (safe) created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -89,6 +105,7 @@ class ScreenCaptureService : Service() {
 
         startWorkerThread()
         setupImageReader()
+        Log.i(TAG, "Body detection started — fast=${SCAN_FAST_MS}ms / slow=${SCAN_SLOW_MS}ms")
         return START_STICKY
     }
 
@@ -98,73 +115,74 @@ class ScreenCaptureService : Service() {
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
+        poseDetector?.close()
         workerThread?.quitSafely()
-        templateBitmap?.recycle()
-        Log.i(TAG, "ScreenCaptureService destroyed safely")
+        Log.i(TAG, "ScreenCaptureService destroyed")
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     // =========================================================================
-    // إعداد الالتقاط
+    // إعداد ML Kit Pose Detector
+    // =========================================================================
+
+    private fun initPoseDetector() {
+        val options = PoseDetectorOptions.Builder()
+            .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
+            .build()
+        poseDetector = PoseDetection.getClient(options)
+        Log.i(TAG, "ML Kit PoseDetector initialized (STREAM_MODE, on-device)")
+    }
+
+    // =========================================================================
+    // إعداد VirtualDisplay
     // =========================================================================
 
     private fun setupImageReader() {
         val m = resources.displayMetrics
-        // نلتقط بدقة نصف الشاشة فقط — يقلل استهلاك الذاكرة
-        val w = m.widthPixels  / 2
+        val w = m.widthPixels / 2     // نصف الدقة — أسرع وأأمن
         val h = m.heightPixels / 2
-        val density = m.densityDpi
-
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "UIQACapture", w, h, density,
+            "UIQACapture", w, h, m.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader!!.surface, null, workerHandler
         )
-        Log.i(TAG, "VirtualDisplay: ${w}×${h}  scan every ${SCAN_INTERVAL_MS}ms")
-        workerHandler?.postDelayed(scanRunnable, SCAN_INTERVAL_MS)
+        workerHandler?.postDelayed(scanRunnable, SCAN_SLOW_MS)
     }
 
     // =========================================================================
-    // Runnable آمن — يمنع التشغيل المتزامن
+    // Runnable — تكيّفي + آمن
     // =========================================================================
 
     private val scanRunnable = object : Runnable {
         override fun run() {
             if (!isRunning) return
-
-            // إذا لا يزال المسح السابق يعمل، تخطّ هذه الدورة
-            if (isScanning.compareAndSet(false, true)) {
-                try {
-                    val start = System.currentTimeMillis()
-                    scanFrame()
-                    val elapsed = System.currentTimeMillis() - start
-                    Log.v(TAG, "Scan done in ${elapsed}ms")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Scan error: ${e.message}")
-                } finally {
-                    isScanning.set(false)
-                }
-            } else {
-                Log.v(TAG, "Scan skipped — previous still running")
+            if (!isDetecting.compareAndSet(false, true)) {
+                // الكشف السابق لم ينته — تخطّ هذه الدورة
+                workerHandler?.postDelayed(this, SCAN_SLOW_MS)
+                return
             }
-
-            if (isRunning) workerHandler?.postDelayed(this, SCAN_INTERVAL_MS)
+            processNextFrame()
+            // الجدولة التالية تتم داخل callback الكشف
         }
     }
 
     // =========================================================================
-    // معالجة الإطار — مصغّر آمن
+    // معالجة الإطار → ML Kit Pose Detection
     // =========================================================================
 
-    private fun scanFrame() {
-        val tmpl = templateBitmap ?: return
-        val image = imageReader?.acquireLatestImage() ?: return
-        var frame: Bitmap? = null
-        var scaled: Bitmap? = null
-        var tmplScaled: Bitmap? = null
+    private fun processNextFrame() {
+        val image = imageReader?.acquireLatestImage()
+        if (image == null) {
+            isDetecting.set(false)
+            workerHandler?.postDelayed(scanRunnable, SCAN_SLOW_MS)
+            return
+        }
+
+        var frameBitmap: Bitmap? = null
+        var scaledBitmap: Bitmap? = null
 
         try {
             val plane  = image.planes[0]
@@ -173,122 +191,153 @@ class ScreenCaptureService : Service() {
             val w      = image.width
             val h      = image.height
 
-            frame = Bitmap.createBitmap(stride, h, Bitmap.Config.ARGB_8888)
-            frame.copyPixelsFromBuffer(buf)
+            frameBitmap = Bitmap.createBitmap(stride, h, Bitmap.Config.ARGB_8888)
+            frameBitmap.copyPixelsFromBuffer(buf)
 
-            // تصغير الإطار والقالب بنسبة SCALE_FACTOR
-            val sw = (w * SCALE_FACTOR).toInt().coerceAtLeast(1)
-            val sh = (h * SCALE_FACTOR).toInt().coerceAtLeast(1)
-            scaled = Bitmap.createScaledBitmap(frame, sw, sh, false)
+            // تصغير 50% لتسريع ML Kit
+            val sw = (w * SCALE_FACTOR).toInt()
+            val sh = (h * SCALE_FACTOR).toInt()
+            scaledBitmap = Bitmap.createScaledBitmap(frameBitmap, sw, sh, true)
+            frameBitmap.recycle(); frameBitmap = null
 
-            val tw = (tmpl.width  * SCALE_FACTOR).toInt().coerceAtLeast(1)
-            val th = (tmpl.height * SCALE_FACTOR).toInt().coerceAtLeast(1)
-            tmplScaled = Bitmap.createScaledBitmap(tmpl, tw, th, false)
+            val inputImage = InputImage.fromBitmap(scaledBitmap, 0)
+            val capturedScaled = scaledBitmap
 
-            if (tw >= sw || th >= sh) return
+            poseDetector?.process(inputImage)
+                ?.addOnSuccessListener { pose ->
+                    capturedScaled.recycle()
+                    handlePoseResult(pose, w, h)
+                    isDetecting.set(false)
+                    val delay = if (detectedBodies > 0) SCAN_FAST_MS else SCAN_SLOW_MS
+                    workerHandler?.postDelayed(scanRunnable, delay)
+                }
+                ?.addOnFailureListener { e ->
+                    capturedScaled.recycle()
+                    Log.w(TAG, "Pose detection failed: ${e.message}")
+                    isDetecting.set(false)
+                    workerHandler?.postDelayed(scanRunnable, SCAN_SLOW_MS)
+                }
+                ?: run {
+                    scaledBitmap.recycle()
+                    isDetecting.set(false)
+                    workerHandler?.postDelayed(scanRunnable, SCAN_SLOW_MS)
+                }
 
-            val result = templateMatchSafe(scaled, tmplScaled)
-            if (result != null && result.score >= MATCH_THRESHOLD) {
-                // تحويل الإحداثيات للدقة الأصلية
-                val origX = result.x / SCALE_FACTOR
-                val origY = result.y / SCALE_FACTOR
-                val origW = tmpl.width.toFloat()
-                val origH = tmpl.height.toFloat()
-                Log.i(TAG, "MATCH! score=${result.score} → orig=(${origX.toInt()},${origY.toInt()})")
-                onMatchFound(floatArrayOf(origX, origY, origX + origW, origY + origH),
-                             (w / SCALE_FACTOR).toInt(), (h / SCALE_FACTOR).toInt())
-            }
+        } catch (e: Exception) {
+            frameBitmap?.recycle()
+            scaledBitmap?.recycle()
+            Log.w(TAG, "Frame error: ${e.message}")
+            isDetecting.set(false)
+            workerHandler?.postDelayed(scanRunnable, SCAN_SLOW_MS)
         } finally {
             image.close()
-            frame?.recycle()
-            scaled?.recycle()
-            tmplScaled?.recycle()
         }
     }
 
     // =========================================================================
-    // SSD Normalized — على الإطار المصغّر
+    // تحليل نتيجة Pose Detection
     // =========================================================================
 
-    data class MatchResult(val x: Int, val y: Int, val score: Float)
-
-    private fun templateMatchSafe(frame: Bitmap, tmpl: Bitmap): MatchResult? {
-        val fw = frame.width; val fh = frame.height
-        val tw = tmpl.width;  val th = tmpl.height
-        if (tw >= fw || th >= fh) return null
-
-        val deadline = System.currentTimeMillis() + MAX_SCAN_MS
-        val tmplPx   = IntArray(tw * th)
-        tmpl.getPixels(tmplPx, 0, tw, 0, 0, tw, th)
-
-        var bestScore = -1f; var bestX = 0; var bestY = 0
-        val patch = IntArray(tw * th)
-        val step  = 2   // خطوة 2px على الإطار المصغّر (= 8px على الأصلي)
-
-        var y = 0
-        while (y <= fh - th) {
-            // تحقق من الوقت في كل سطر
-            if (System.currentTimeMillis() > deadline) {
-                Log.w(TAG, "Scan timed out at y=$y — aborting safely")
-                break
-            }
-            var x = 0
-            while (x <= fw - tw) {
-                frame.getPixels(patch, 0, tw, x, y, tw, th)
-                val s = ssdScore(tmplPx, patch)
-                if (s > bestScore) { bestScore = s; bestX = x; bestY = y }
-                x += step
-            }
-            y += step
+    private fun handlePoseResult(pose: Pose, frameW: Int, frameH: Int) {
+        // فلتر النقاط عالية الثقة فقط
+        val goodLandmarks = pose.allPoseLandmarks.filter {
+            it.inFrameLikelihood >= LANDMARK_CONFIDENCE
         }
-        return if (bestScore > 0) MatchResult(bestX, bestY, bestScore) else null
+
+        if (goodLandmarks.size < MIN_LANDMARKS) {
+            detectedBodies = 0
+            confirmCount   = 0
+            lastBodyCenter = null
+            updateNotification("لم يُكتشف جسم بشري")
+            return
+        }
+
+        detectedBodies = 1
+
+        // حساب Bounding Box من أقصى إحداثيات النقاط المكتشفة
+        val xs = goodLandmarks.map { it.position.x / SCALE_FACTOR }
+        val ys = goodLandmarks.map { it.position.y / SCALE_FACTOR }
+        val xMin = xs.min(); val xMax = xs.max()
+        val yMin = ys.min(); val yMax = ys.max()
+
+        // توسيع الصندوق بهامش 10% لشمول حواف الجسم
+        val padX = (xMax - xMin) * 0.10f
+        val padY = (yMax - yMin) * 0.10f
+        val box = floatArrayOf(
+            (xMin - padX).coerceAtLeast(0f),
+            (yMin - padY).coerceAtLeast(0f),
+            (xMax + padX).coerceAtMost(frameW.toFloat()),
+            (yMax + padY).coerceAtMost(frameH.toFloat())
+        )
+
+        // نقطة الاستهداف الذكية: مركز الجسم العلوي (منتصف الكتفين إن وُجدا، وإلا مركز الصندوق)
+        val smartCenter = getSmartTargetPoint(pose, box)
+
+        // نظام التأكيد المزدوج — يُرسل ضغطة بعد إطارين متتاليين للتأكد من الهدف
+        val prev = lastBodyCenter
+        if (prev != null && abs(smartCenter.x - prev.x) < 80f && abs(smartCenter.y - prev.y) < 80f) {
+            confirmCount++
+        } else {
+            confirmCount = 1
+        }
+        lastBodyCenter = smartCenter
+
+        val confidence = (goodLandmarks.size * 100f / 33f).toInt()
+        updateNotification("جسم مكتشف ✓  ثقة: $confidence%  نقاط: ${goodLandmarks.size}/33")
+        Log.i(TAG, "Body at box=(${xMin.toInt()},${yMin.toInt()},${xMax.toInt()},${yMax.toInt()}) " +
+                   "center=(${smartCenter.x.toInt()},${smartCenter.y.toInt()}) " +
+                   "confidence=$confidence% confirm=$confirmCount")
+
+        if (confirmCount >= CONFIRM_NEEDED) {
+            dispatchTap(box, frameW, frameH)
+        }
     }
 
-    private fun ssdScore(tmpl: IntArray, patch: IntArray): Float {
-        var ssd = 0.0
-        val max = tmpl.size * 3.0 * 255.0 * 255.0
-        for (i in tmpl.indices) {
-            val dr = ((tmpl[i] shr 16 and 0xFF) - (patch[i] shr 16 and 0xFF)).toDouble()
-            val dg = ((tmpl[i] shr  8 and 0xFF) - (patch[i] shr  8 and 0xFF)).toDouble()
-            val db = ((tmpl[i]        and 0xFF) - (patch[i]        and 0xFF)).toDouble()
-            ssd += dr*dr + dg*dg + db*db
+    /**
+     * يختار نقطة الاستهداف الأذكى:
+     * 1. منتصف الكتفين إن كانا مكتشفَين بثقة عالية
+     * 2. وإلا مركز الصدر (منتصف الصندوق أفقياً، الثلث العلوي عمودياً)
+     */
+    private fun getSmartTargetPoint(pose: Pose, box: FloatArray): PointF {
+        val lShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
+        val rShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
+
+        return if (lShoulder != null && rShoulder != null &&
+            lShoulder.inFrameLikelihood >= LANDMARK_CONFIDENCE &&
+            rShoulder.inFrameLikelihood >= LANDMARK_CONFIDENCE) {
+            PointF(
+                ((lShoulder.position.x + rShoulder.position.x) / 2f) / SCALE_FACTOR,
+                ((lShoulder.position.y + rShoulder.position.y) / 2f) / SCALE_FACTOR
+            )
+        } else {
+            // مركز الثلث العلوي من الصندوق (منطقة الصدر/الرأس)
+            PointF(
+                (box[0] + box[2]) / 2f,
+                box[1] + (box[3] - box[1]) * 0.30f
+            )
         }
-        return (1.0 - ssd / max).toFloat().coerceIn(0f, 1f)
     }
 
     // =========================================================================
-    // عند التطابق
+    // إرسال الضغطة عبر DPU + UiAutomationService
     // =========================================================================
 
-    private fun onMatchFound(box: FloatArray, frameW: Int, frameH: Int) {
+    private fun dispatchTap(box: FloatArray, frameW: Int, frameH: Int) {
         UiAutomationService.instance?.tapBestTarget(
             rawBoxes     = listOf(box),
             screenWidth  = frameW,
             screenHeight = frameH,
             offsetState  = offsetState,
             isPressing   = true
-        ) ?: Log.w(TAG, "UiAutomationService not connected")
+        ) ?: Log.w(TAG, "UiAutomationService not ready")
     }
 
     // =========================================================================
     // مساعدات
     // =========================================================================
 
-    private fun loadTemplate() {
-        try {
-            assets.open("head_target.png").use {
-                templateBitmap = BitmapFactory.decodeStream(it)
-                Log.i(TAG, "Template: ${templateBitmap?.width}×${templateBitmap?.height}px")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Using fallback 20×20 template")
-            templateBitmap = Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888)
-                .also { it.eraseColor(0xFFFF0000.toInt()) }
-        }
-    }
-
     private fun startWorkerThread() {
-        workerThread = HandlerThread("TemplateMatchWorker", android.os.Process.THREAD_PRIORITY_BACKGROUND)
+        workerThread = HandlerThread("PoseDetectWorker", android.os.Process.THREAD_PRIORITY_BACKGROUND)
             .apply { start() }
         workerHandler = Handler(workerThread!!.looper)
     }
@@ -297,16 +346,21 @@ class ScreenCaptureService : Service() {
         override fun onStop() { Log.w(TAG, "Projection stopped"); stopSelf() }
     }
 
+    private fun updateNotification(status: String) {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(NOTIF_ID, buildNotification(status))
+    }
+
     private fun createNotificationChannel() {
-        val ch = NotificationChannel(NOTIF_CHANNEL_ID, "UI QA Screen Capture",
+        val ch = NotificationChannel(NOTIF_CHANNEL_ID, "UI QA Body Detection",
             NotificationManager.IMPORTANCE_LOW)
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
     }
 
     private fun buildNotification(status: String): Notification =
         NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
-            .setContentTitle("UI QA — Template Matching")
+            .setContentTitle("UI QA — اكتشاف الجسم البشري")
             .setContentText(status)
-            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true).build()
 }
