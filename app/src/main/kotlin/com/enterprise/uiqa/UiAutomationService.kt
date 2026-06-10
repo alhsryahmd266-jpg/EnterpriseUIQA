@@ -20,9 +20,24 @@ class UiAutomationService : AccessibilityService() {
             private set
     }
 
-    override fun onServiceConnected() { super.onServiceConnected(); instance = this; Log.i(TAG, "connected") }
-    override fun onDestroy() { instance = null; super.onDestroy() }
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        // تهيئة المؤشر العائم وإظهاره فور تفعيل الخدمة
+        FloatingTapIndicator.instance = FloatingTapIndicator(this)
+        FloatingTapIndicator.instance?.show()
+        Log.i(TAG, "connected — floating indicator ready")
+    }
+
+    override fun onDestroy() {
+        FloatingTapIndicator.instance?.dismiss()
+        FloatingTapIndicator.instance = null
+        instance = null
+        super.onDestroy()
+    }
+
     override fun onInterrupt() { Log.w(TAG, "interrupted") }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
@@ -30,20 +45,9 @@ class UiAutomationService : AccessibilityService() {
     }
 
     // =========================================================================
-    // tapBestTarget — يدمج DPU مع الضغط مباشرة
+    // tapBestTarget — يدمج DPU مع المؤشر العائم والضغط
     // =========================================================================
 
-    /**
-     * يستقبل صناديق خام من ScreenCaptureService، يختار الأفضل عبر ProximitySorter،
-     * يعوّض الانحراف عبر DynamicOffset، ثم ينفّذ النقرة في أجزاء من الثانية.
-     *
-     * @param rawBoxes     مصفوفات [[Xmin,Ymin,Xmax,Ymax], …]
-     * @param screenWidth  عرض الشاشة
-     * @param screenHeight ارتفاع الشاشة
-     * @param offsetState  حالة الإزاحة للجلسة الحالية
-     * @param isPressing   هل الضغط مستمر؟
-     * @param callback     نتيجة اختيارية
-     */
     fun tapBestTarget(
         rawBoxes: List<FloatArray>,
         screenWidth: Int,
@@ -57,7 +61,11 @@ class UiAutomationService : AccessibilityService() {
         ) ?: run { Log.w(TAG, "tapBestTarget: no boxes"); return }
 
         Log.d(TAG, "tapBestTarget → adj=(${point.adjusted.x.toInt()},${point.adjusted.y.toInt()}) " +
-                   "Δy=${point.offsetApplied.toInt()} Σ=${point.totalOffset.toInt()}")
+                "Δy=${point.offsetApplied.toInt()} Σ=${point.totalOffset.toInt()}")
+
+        // تحريك المؤشر العائم للهدف
+        FloatingTapIndicator.instance?.moveTo(point.adjusted.x, point.adjusted.y)
+
         tap(point.adjusted.x, point.adjusted.y, callback)
     }
 
@@ -158,10 +166,6 @@ class UiAutomationService : AccessibilityService() {
         for (i in steps downTo 1) r.add(PointF(-radius * i / steps, 0f))
         return r
     }
-
-    // =========================================================================
-    // فحص العناصر
-    // =========================================================================
 
     fun findNodeByDescription(d: String) = rootInActiveWindow?.findAccessibilityNodeInfosByText(d)?.firstOrNull()
     fun findNodeById(id: String) = rootInActiveWindow?.findAccessibilityNodeInfosByViewId(id)?.firstOrNull()
