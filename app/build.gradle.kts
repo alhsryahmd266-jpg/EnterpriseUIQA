@@ -11,8 +11,8 @@ android {
         applicationId = "com.enterprise.uiqa"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.0.5"
+        versionCode = 6
+        versionName = "2.0.0"
     }
 
     signingConfigs {
@@ -57,7 +57,5 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-
-    // ML Kit Pose Detection — اكتشاف الجسم البشري كاملاً بدون إنترنت
     implementation("com.google.mlkit:pose-detection:18.0.0-beta4")
 }
